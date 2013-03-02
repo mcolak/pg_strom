@@ -12,6 +12,54 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+
+#include "foreign/fdwapi.h"
+
+/* definition of shadow tables */
+#define PGSTROM_SCHEMA_NAME		"pg_strom"
+#define Natts_pg_strom_rmap			3
+#define Anum_pg_strom_rmap_rowid	1
+#define Anum_pg_strom_rmap_nitems	2
+#define Anum_pg_strom_rmap_rowmap	3
+
+#define Natts_pg_strom_cs			5
+#define Anum_pg_strom_cs_attnum		1
+#define Anum_pg_strom_cs_rowid		2
+#define Anum_pg_strom_cs_nitems		3
+#define Anum_pg_strom_cs_isnull		4
+#define Anum_pg_strom_cs_values		5
+
+/* clserv.c */
+extern void pgstrom_opencl_init(void);
+
+/* columnize.c */
+extern void pgstrom_columnizer_init(void);
+
+/* plan.c */
+extern void pgstrom_planner_init(FdwRoutine *fdw_routine);
+
+/* exec.c */
+extern void pgstrom_executor_init(FdwRoutine *fdw_routine);
+
+/* utilcmds.c */
+extern Relation pgstrom_open_shadow_rmap(Relation frel, LOCKMODE lockmode);
+extern Relation pgstrom_open_shadow_cstore(Relation frel, LOCKMODE lockmode);
+extern Relation pgstrom_open_shadow_rstore(Relation frel, LOCKMODE lockmode);
+extern Relation pgstrom_open_shadow_rmap_index(Relation frel,
+											   LOCKMODE lockmode);
+extern Relation pgstrom_open_shadow_cstore_index(Relation frel,
+												 LOCKMODE lockmode);
+extern bool pgstrom_check_relation_compatible(Relation rel1, Relation rel2);
+extern void pgstrom_utilcmds_init(void);
+
+/* main.c */
+extern bool is_pgstrom_managed_server(const char *serv_name);
+extern bool is_pgstrom_managed_relation(Relation relation);
+extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
+
+
+
+#if 0
 #include "commands/explain.h"
 #include "storage/shmem.h"
 #include "foreign/fdwapi.h"
@@ -219,5 +267,6 @@ extern Datum pgstrom_data_compaction(PG_FUNCTION_ARGS);
  */
 extern FdwRoutine PgStromFdwHandlerData;
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);
+#endif
 
 #endif	/* PG_STROM_H */

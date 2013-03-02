@@ -1,9 +1,10 @@
 /*
  * plan.c
  *
- * Routines to plan streamed query execution.
+ * Planner routine of PG-Strom
  *
  * --
+ * Copyright 2013 (c) PG-Strom Development Team
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
  * This software is an extension of PostgreSQL; You can use, copy,
@@ -11,6 +12,42 @@
  * within this package.
  */
 #include "postgres.h"
+#include "pg_strom.h"
+
+
+static void
+pgstrom_get_foreign_rel_size(PlannerInfo *root,
+							 RelOptInfo *baserel,
+							 Oid foreigntableid)
+{}
+
+static void
+pgstrom_get_foreign_paths(PlannerInfo *root,
+						  RelOptInfo *baserel,
+						  Oid foreigntableid)
+{}
+
+static ForeignScan *
+pgstrom_get_foreign_plan(PlannerInfo *root,
+						 RelOptInfo *baserel,
+						 Oid foreigntableid,
+						 ForeignPath *best_path,
+						 List *tlist,
+						 List *scan_clauses)
+{
+	return NULL;
+}
+
+void
+pgstrom_planner_init(FdwRoutine *fdw_routine)
+{
+	fdw_routine->GetForeignRelSize	= pgstrom_get_foreign_rel_size;
+	fdw_routine->GetForeignPaths	= pgstrom_get_foreign_paths;
+	fdw_routine->GetForeignPlan		= pgstrom_get_foreign_plan;
+}
+
+
+#if 0
 #include "access/sysattr.h"
 #include "catalog/pg_type.h"
 #include "commands/sequence.h"
@@ -631,3 +668,4 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 		 */
 	}
 }
+#endif

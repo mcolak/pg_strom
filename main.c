@@ -4,6 +4,7 @@
  * Entrypoint of the PG-Strom extension
  *
  * --
+ * Copyright 2013 (c) PG-Strom Development Team
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
  * This software is an extension of PostgreSQL; You can use, copy,
@@ -12,7 +13,9 @@
  */
 #include "postgres.h"
 #include "fmgr.h"
+#include "foreign/foreign.h"
 #include "miscadmin.h"
+#include "utils/rel.h"
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
@@ -22,17 +25,7 @@ PG_MODULE_MAGIC;
  */
 void		_PG_init(void);
 
-FdwRoutine	PgStromFdwHandlerData = {
-	.type				= T_FdwRoutine,
-	.GetForeignRelSize	= pgstrom_get_foreign_rel_size,
-	.GetForeignPaths	= pgstrom_get_foreign_paths,
-	.GetForeignPlan		= pgstrom_get_foreign_plan,
-	.ExplainForeignScan	= pgstrom_explain_foreign_scan,
-	.BeginForeignScan	= pgstrom_begin_foreign_scan,
-	.IterateForeignScan	= pgstrom_iterate_foreign_scan,
-	.ReScanForeignScan	= pgstrom_rescan_foreign_scan,
-	.EndForeignScan		= pgstrom_end_foreign_scan,
-};
+static FdwRoutine	PgStromFdwHandlerData;
 
 /*
  * pgstrom_fdw_handler - FDW Handler function of PG-Strom
@@ -43,6 +36,27 @@ pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(&PgStromFdwHandlerData);
 }
 PG_FUNCTION_INFO_V1(pgstrom_fdw_handler);
+
+bool
+is_pgstrom_managed_server(const char *serv_name)
+{
+	ForeignServer	   *serv = GetForeignServerByName(serv_name, false);
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(serv->fdwid);
+
+	if (GetFdwRoutine(fdw->fdwhandler) == &PgStromFdwHandlerData)
+		return true;
+	return false;
+}
+
+bool
+is_pgstrom_managed_relation(Relation relation)
+{
+	Oid		relid = RelationGetRelid(relation);
+
+	if (GetFdwRoutineByRelId(relid) == &PgStromFdwHandlerData)
+		return true;
+	return false;
+}
 
 void
 _PG_init(void)
@@ -55,17 +69,17 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* initialize shared memory segment */
-	pgstrom_shmseg_init();
+	/* initialize planner/executor stuff */
+	memset(&PgStromFdwHandlerData, 0, sizeof(FdwRoutine));
+	PgStromFdwHandlerData.type = T_FdwRoutine;
+	pgstrom_planner_init(&PgStromFdwHandlerData);
+	pgstrom_executor_init(&PgStromFdwHandlerData);
 
-	/* initialize CUDA related stuff */
-	pgstrom_gpu_init();
+	/* initialize OpenCL computing server */
+	pgstrom_opencl_init();
 
-	/* initialize OpenMP related stuff */
-	pgstrom_cpu_init();
-
-	/* initialize executor related stuff */
-	pgstrom_executor_init();
+	/* initialize asynchronous columnizer worker */
+	pgstrom_columnizer_init();
 
 	/* register utility commands hooks */
 	pgstrom_utilcmds_init();

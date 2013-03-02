@@ -4,6 +4,7 @@
  * Executor routines of PG-Strom
  *
  * --
+ * Copyright 2013 (c) PG-Strom Development Team
  * Copyright 2011-2012 (c) KaiGai Kohei <kaigai@kaigai.gr.jp>
  *
  * This software is an extension of PostgreSQL; You can use, copy,
@@ -11,6 +12,44 @@
  * within this package.
  */
 #include "postgres.h"
+#include "pg_strom.h"
+
+static void
+pgstrom_explain_foreign_scan(ForeignScanState *node,
+							 struct ExplainState *es)
+{}
+
+static void
+pgstrom_begin_foreign_scan(ForeignScanState *node, int eflags)
+{}
+
+static TupleTableSlot *
+pgstrom_iterate_foreign_scan(ForeignScanState *node)
+{
+	return NULL;
+}
+
+static void
+pgstrom_rescan_foreign_scan(ForeignScanState *node)
+{}
+
+static void
+pgstrom_end_foreign_scan(ForeignScanState *node)
+{}
+
+void
+pgstrom_executor_init(FdwRoutine *fdw_routine)
+{
+	fdw_routine->ExplainForeignScan	= pgstrom_explain_foreign_scan;
+	fdw_routine->BeginForeignScan	= pgstrom_begin_foreign_scan;
+	fdw_routine->IterateForeignScan	= pgstrom_iterate_foreign_scan;
+	fdw_routine->ReScanForeignScan	= pgstrom_rescan_foreign_scan;
+	fdw_routine->EndForeignScan		= pgstrom_end_foreign_scan;
+}
+
+
+
+#if 0
 #include "access/tupmacs.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
@@ -1257,3 +1296,4 @@ pgstrom_executor_init(void)
 							 0,
 							 NULL, NULL, NULL);
 }
+#endif
