@@ -533,6 +533,8 @@ cstore_post_change_owner(Relation frel)
 static void
 cstore_post_drop_column(Relation frel, const char *colname)
 {
+	char			namebuf[NAMEDATALEN + 1];
+	RangeVar	   *range;
 	Relation		cs_rel;
 	Relation		cs_idx;
 	IndexScanDesc	iscan;
@@ -540,14 +542,19 @@ cstore_post_drop_column(Relation frel, const char *colname)
 	HeapTuple		tuple;
 	AttrNumber		attnum;
 
-	tuple = SearchSysCache2(ATTNAME,
-							ObjectIdGetDatum(RelationGetRelid(frel)),
-							CStringGetDatum(colname));
-	if (!HeapTupleIsValid(tuple))
+	/*
+	 * XXX - At this timing, dropped column of the given frel is already
+	 * renamed, thus, we pick up attribute number towards the given column
+	 * name from underlying shadow row-store that has compatible table
+	 * layout.
+	 */
+	snprintf(namebuf, sizeof(namebuf), ShadowRstoreFmt,
+			 RelationGetRelid(frel));
+	range = makeRangeVar(PGSTROM_SCHEMA_NAME, namebuf, -1);
+	attnum = get_attnum(RangeVarGetRelid(range, NoLock, false), colname);
+	if (attnum == InvalidAttrNumber)
 		elog(ERROR, "cache lookup failed for column \"%s\" of relation \"%s\"",
 			 colname, RelationGetRelationName(frel));
-	attnum = ((Form_pg_attribute) GETSTRUCT(tuple))->attnum;
-	ReleaseSysCache(tuple);
 
 	/*
 	 * Remove all the relevant tuples in cstore
