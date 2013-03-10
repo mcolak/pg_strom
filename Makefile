@@ -1,12 +1,12 @@
 # Makefile of pg_strom
 MODULE_big = pg_strom
-OBJS = main.o plan.o exec.o utilcmds.o columnizer.o opencl_serv.o
+OBJS = main.o plan.o exec.o utilcmds.o columnizer.o \
+	opencl_serv.o opencl_entry.o
 
-OPENCL_DIR := /usr/local/cuda
-OPENCL_INCLUDE := $(OPENCL_DIR)/include
-
-PG_CPPFLAGS := -I$(OPENCL_INCLUDE)
-SHLIB_LINK := -lcuda -Wl,-rpath,'$(OPENCL_DIR)/lib64' -Wl,-rpath,'$(OPENCL_DIR)/lib'
+OPENCL_INCLUDE := /usr/include
+# OPENCL_INCLUDE := /usr/local/cuda/include
+PG_CPPFLAGS := -I$(OPENCL_INCLUDE) -Werror
+SHLIB_LINK := -ldl
 
 EXTENSION = pg_strom
 DATA = pg_strom--1.0.sql
