@@ -1,7 +1,7 @@
 # Makefile of PG-Strom
 MODULE_big = pg_strom
 OBJS = main.o shmseg.o plan.o scan.o modify.o utilcmds.o \
-	opencl_serv.o opencl_entry.o
+	opencl_serv.o opencl_entry.o toast.o
 
 OPENCL_INCLUDE := /usr/include
 # OPENCL_INCLUDE := /usr/local/cuda/include

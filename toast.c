@@ -45,7 +45,7 @@
 #include "utils/rel.h"
 #include "utils/typcache.h"
 #include "utils/tqual.h"
-
+#include "pg_strom.h"
 
 #undef TOAST_DEBUG
 
@@ -81,8 +81,10 @@ do { \
 static void toast_delete_datum(Relation rel, Datum value);
 static Datum toast_save_datum(Relation rel, Datum value,
 				 struct varlena * oldexternal, int options);
+#endif
 static bool toastrel_valueid_exists(Relation toastrel, Oid valueid);
 static bool toastid_valueid_exists(Oid toastrelid, Oid valueid);
+#if 0
 static struct varlena *toast_fetch_datum(struct varlena * attr);
 static struct varlena *toast_fetch_datum_slice(struct varlena * attr,
 						int32 sliceoffset, int32 length);
@@ -1528,7 +1530,7 @@ toast_delete_datum(Relation rel, Datum value)
 	heap_close(toastrel, RowExclusiveLock);
 }
 
-#if 0
+
 /* ----------
  * toastrel_valueid_exists -
  *
@@ -1584,7 +1586,6 @@ toastid_valueid_exists(Oid toastrelid, Oid valueid)
 
 	return result;
 }
-#endif
 
 /* ----------
  * toast_fetch_datum -
@@ -1756,13 +1757,13 @@ toast_fetch_datum(struct varlena * attr)
 void
 toast_extract_datum(void *dest, struct varlena *value, int32 length_be)
 {
-	if (VARATT_IS_EXTERNAL(val))
+	if (VARATT_IS_EXTERNAL(value))
 	{
 		struct varlena *temp = toast_fetch_datum(value);
 		toast_extract_datum(dest, temp, length_be);
 		pfree(temp);
 	}
-	else if (VARATT_IS_COMPRESSED(val))
+	else if (VARATT_IS_COMPRESSED(value))
 	{
 		PGLZ_Header *lzhd = (PGLZ_Header *) value;
 		Assert(length_be < 0 || PGLZ_RAW_SIZE(lzhd) == length_be);
