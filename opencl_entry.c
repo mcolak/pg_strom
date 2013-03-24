@@ -111,11 +111,11 @@ clGetDeviceInfo(cl_device_id device,
 /*
  * Contexts
  */
-static (*p_clCreateContext)(
+static cl_context (*p_clCreateContext)(
 	const cl_context_properties *properties,
 	cl_uint num_devices,
 	const cl_device_id *devices,
-	(voidCL_CALLBACK  *pfn_notify) (
+	void (CL_CALLBACK  *pfn_notify)(
 		const char *errinfo, 
 		const void *private_info, size_t cb, 
 		void *user_data),
@@ -124,10 +124,11 @@ static (*p_clCreateContext)(
 static cl_context (*p_clCreateContextFromType)(
 	const cl_context_properties   *properties,
 	cl_device_type  device_type,
-	void  (CL_CALLBACK *pfn_notify) (const char *errinfo,
-									 const void  *private_info,
-									 size_t  cb,
-									 void  *user_data),
+	void (CL_CALLBACK *pfn_notify)(
+		const char *errinfo,
+		const void  *private_info,
+		size_t  cb,
+		void  *user_data),
 	void  *user_data,
 	cl_int  *errcode_ret) = NULL;
 static cl_int (*p_clRetainContext)(cl_context context) = NULL;
@@ -143,7 +144,7 @@ cl_context
 clCreateContext(const cl_context_properties *properties,
 				cl_uint num_devices,
 				const cl_device_id *devices,
-				(voidCL_CALLBACK  *pfn_notify) (
+				void (CL_CALLBACK  *pfn_notify)(
 					const char *errinfo, 
 					const void *private_info,
 					size_t cb, 
@@ -179,23 +180,26 @@ clCreateContextFromType(const cl_context_properties *properties,
 										errcode_ret);
 }
 
-cl_int clRetainContext(cl_context context)
+cl_int
+clRetainContext(cl_context context)
 {
 	Assert(p_clRetainContext != NULL);
 	return (*p_clRetainContext)(context);
 }
 
-cl_int clReleaseContext (cl_context context)
+cl_int
+clReleaseContext(cl_context context)
 {
 	Assert(p_clReleaseContext != NULL);
 	return (*p_clReleaseContext)(context);
 }
 
-cl_int clGetContextInfo (cl_context context,
-						 cl_context_info param_name,
-						 size_t param_value_size,
-						 void *param_value,
-						 size_t * param_value_size_ret)
+cl_int
+clGetContextInfo(cl_context context,
+				 cl_context_info param_name,
+				 size_t param_value_size,
+				 void *param_value,
+				 size_t * param_value_size_ret)
 {
 	Assert(p_clGetContextInfo != NULL);
 	return (*p_clGetContextInfo)(context,
@@ -217,11 +221,6 @@ static cl_int (*p_clRetainCommandQueue)(
 	cl_command_queue command_queue) = NULL;
 static cl_int (*p_clReleaseCommandQueue)(
 	cl_command_queue command_queue) = NULL;
-static cl_int clSetCommandQueueProperty(
-	cl_command_queue command_queue,
-	cl_command_queue_properties properties,
-	cl_bool enable,
-	cl_command_queue_properties *old_properties) = NULL;
 
 cl_command_queue
 clCreateCommandQueue(cl_context context,
@@ -247,19 +246,6 @@ clReleaseCommandQueue(cl_command_queue command_queue)
 {
 	Assert(p_clReleaseCommandQueue != NULL);
 	return (*p_clReleaseCommandQueue)(command_queue);
-}
-
-cl_int
-clSetCommandQueueProperty(cl_command_queue command_queue,
-						  cl_command_queue_properties properties,
-						  cl_bool enable,
-						  cl_command_queue_properties *old_properties)
-{
-	Assert(p_clSetCommandQueueProperty != NULL);
-	return (*p_clSetCommandQueueProperty)(command_queue,
-										  properties,
-										  enable,
-										  old_properties);
 }
 
 /*
@@ -830,7 +816,7 @@ clEnqueueBarrier(cl_command_queue command_queue)
 static cl_event (*p_clCreateUserEvent)(
 	cl_context context,
 	cl_int *errcode_ret) = NULL;
-static cl_mem (*p_clSetUserEventStatus)(
+static cl_int (*p_clSetUserEventStatus)(
 	cl_event event,
 	cl_int execution_status) = NULL;
 static cl_int (*p_clWaitForEvents)(
@@ -861,7 +847,7 @@ clCreateUserEvent(cl_context context,
 	return (*p_clCreateUserEvent)(context, errcode_ret);
 }
 
-cl_mem
+cl_int
 clSetUserEventStatus(cl_event event,
 					 cl_int execution_status)
 {
@@ -984,10 +970,10 @@ lookup_opencl_function(void *handle, const char *func_name)
 }
 
 #define LOOKUP_OPENCL_FUNCTION(func_name)			\
-	p_#func_name = lookup_opencl_function(handle, func_name);
+	p_##func_name = lookup_opencl_function(handle, #func_name)
 
 void
-opencl_entrypoint_init(void)
+pgstrom_opencl_entry_init(void)
 {
 	void   *handle;
 
@@ -1014,7 +1000,6 @@ opencl_entrypoint_init(void)
 		LOOKUP_OPENCL_FUNCTION(clCreateCommandQueue);
 		LOOKUP_OPENCL_FUNCTION(clRetainCommandQueue);
 		LOOKUP_OPENCL_FUNCTION(clReleaseCommandQueue);
-		LOOKUP_OPENCL_FUNCTION(clSetCommandQueueProperty);
 		/* Memory Objects (partial) */
 		LOOKUP_OPENCL_FUNCTION(clCreateBuffer);
 		LOOKUP_OPENCL_FUNCTION(clCreateSubBuffer);

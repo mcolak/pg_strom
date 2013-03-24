@@ -1,6 +1,6 @@
-# Makefile of pg_strom
+# Makefile of PG-Strom
 MODULE_big = pg_strom
-OBJS = main.o plan.o exec.o utilcmds.o columnizer.o \
+OBJS = main.o shmseg.o plan.o scan.o modify.o utilcmds.o \
 	opencl_serv.o opencl_entry.o
 
 OPENCL_INCLUDE := /usr/include

@@ -6,10 +6,25 @@ CREATE FUNCTION pgstrom_fdw_handler()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
---CREATE FUNCTION pgstrom_fdw_validator(text[], oid)
---  RETURNS void
---  AS 'MODULE_PATHNAME'
---  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom_fdw_validator(text[], oid)
+  RETURNS void
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_managed_relation(regclass)
+  RETURNS bool
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_rowstore_count(regclass)
+  RETURNS int64
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_colstore_count(regclass)
+  RETURNS int64
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
 
 CREATE FOREIGN DATA WRAPPER pg_strom
   HANDLER pgstrom_fdw_handler;

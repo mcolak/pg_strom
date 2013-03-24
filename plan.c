@@ -1,7 +1,7 @@
 /*
  * plan.c
  *
- * Planner routine of PG-Strom
+ * Routines for FDW planenr
  *
  * --
  * Copyright 2013 (c) PG-Strom Development Team
@@ -12,20 +12,131 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/sysattr.h"
+#include "catalog/pg_class.h"
+#include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/planmain.h"
+#include "optimizer/var.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "pg_strom.h"
 
+
+static bool
+is_opencl_executable_qual(RelOptInfo *baserel, RestrictInfo *rinfo)
+{
+	if (bms_membership(rinfo->clause_relids) == BMS_MULTIPLE)
+		return false;
+	/*
+	 * XXX - add practical checks here
+	 */
+	return false;
+}
 
 static void
 pgstrom_get_foreign_rel_size(PlannerInfo *root,
 							 RelOptInfo *baserel,
 							 Oid foreigntableid)
-{}
+{
+	AttrNumber	i, attno;
+	int			width = baserel->width;
+
+	for (i = baserel->min_attr; i <= baserel->max_attr; i++)
+	{
+		attno = i - baserel->min_attr;
+
+		if (attno > 0 && !bms_is_empty(baserel->attr_needed[attno]))
+			width += get_attavgwidth(foreigntableid, attno);
+	}
+
+	/*
+	 * TODO: we will put here more practical estimation
+	 */
+	baserel->rows = 10000.0;
+	baserel->width = width;
+}
 
 static void
 pgstrom_get_foreign_paths(PlannerInfo *root,
 						  RelOptInfo *baserel,
 						  Oid foreigntableid)
-{}
+{
+	ListCell	   *cell;
+	Cost			startup_cost = 0.0;
+	Cost			total_cost = 0.0;
+	ForeignPath	   *fpath;
+
+	foreach (cell, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(cell);
+		QualCost		qcost;
+
+		cost_qual_eval(&qcost, list_make1(rinfo->clause), root);
+		/*
+		 * cost discount towards quals that can run on OpenCL server
+		 *
+		 * XXX - discount rate should be more practical according to
+		 * the resource installation.
+		 */
+		if (is_opencl_executable_qual(baserel, rinfo))
+			qcost.per_tuple /= 1000;
+		baserel->baserestrictcost.startup += qcost.startup;
+		baserel->baserestrictcost.per_tuple += qcost.per_tuple;
+	}
+
+	/*
+	 * construction of ForeignPath
+	 */
+	startup_cost = baserel->baserestrictcost.startup;
+	total_cost = baserel->baserestrictcost.startup +
+		baserel->baserestrictcost.per_tuple * baserel->rows;
+
+	fpath = create_foreignscan_path(root, baserel,
+									baserel->rows,
+									startup_cost,
+									total_cost,
+									NIL,	/* no pathkeys */
+									NULL,	/* no outer rel either */
+									NULL);
+	add_path(baserel, (Path *) fpath);
+}
+
+static Bitmapset *
+fixup_whole_row_reference(PlannerInfo *root, Index rtindex, Bitmapset *columns)
+{
+	RangeTblEntry  *rte;
+	HeapTuple		tup;
+	AttrNumber		attno, nattrs;
+
+	attno = InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber;
+	if (bms_is_member(attno, columns))
+		return columns;
+
+	rte = root->simple_rte_array[rtindex];
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
+	nattrs = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
+	ReleaseSysCache(tup);
+
+	columns = bms_del_member(columns, attno);
+	for (attno = 1; attno <= nattrs; attno++)
+	{
+		tup = SearchSysCache2(ATTNUM,
+							  ObjectIdGetDatum(rte->relid),
+							  Int16GetDatum(attno));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 attno, rte->relid);
+		if (!((Form_pg_attribute) GETSTRUCT(tup))->attisdropped)
+			columns = bms_add_member(columns, attno);
+		ReleaseSysCache(tup);
+	}
+	return columns;
+}
 
 static ForeignScan *
 pgstrom_get_foreign_plan(PlannerInfo *root,
@@ -35,11 +146,68 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 						 List *tlist,
 						 List *scan_clauses)
 {
-	return NULL;
+	List	   *fdw_private = NIL;
+	List	   *host_quals = NIL;
+	List	   *kernel_quals = NIL;
+	Bitmapset  *host_cols = NULL;
+	Bitmapset  *kernel_cols = NULL;
+	ListCell   *cell;
+	AttrNumber	attno;
+	DefElem	   *defel;
+
+	foreach (cell, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(cell);
+
+		if (is_opencl_executable_qual(baserel, rinfo))
+			kernel_quals = lappend(kernel_quals, copyObject(rinfo->clause));
+		else
+			host_quals = lappend(host_quals, copyObject(rinfo->clause));
+	}
+
+	if (kernel_quals != NIL)
+	{
+		// TODO: code generation of kernel_quals,
+		// and "kernel_source" should be added here
+
+	}
+
+	pull_varattnos((Node *)kernel_quals, baserel->relid, &kernel_cols);
+	kernel_cols = fixup_whole_row_reference(root, baserel->relid, kernel_cols);
+	while ((attno = bms_first_member(kernel_cols)) >= 0)
+	{
+		attno += FirstLowInvalidHeapAttributeNumber;
+		if (attno > 0)
+		{
+			defel = makeDefElem("kernel_cols", (Node *)makeInteger(attno));
+			fdw_private = lappend(fdw_private, defel);
+		}
+	}
+
+	pull_varattnos((Node *)host_quals, baserel->relid, &host_cols);
+    pull_varattnos((Node *)tlist, baserel->relid, &host_cols);
+	host_cols = fixup_whole_row_reference(root, baserel->relid, host_cols);
+	while ((attno = bms_first_member(host_cols)) >= 0)
+	{
+		attno += FirstLowInvalidHeapAttributeNumber;
+		if (attno > 0)
+		{
+			defel = makeDefElem("host_cols", (Node *)makeInteger(attno));
+			fdw_private = lappend(fdw_private, defel);
+		}
+		else if (attno == SelfItemPointerAttributeNumber)
+			defel = makeDefElem("needs_ctid", (Node *) makeInteger(true));
+	}
+
+	return make_foreignscan(tlist,
+							host_quals,
+							baserel->relid,
+							kernel_quals,
+							fdw_private);
 }
 
 void
-pgstrom_planner_init(FdwRoutine *fdw_routine)
+pgstrom_fdw_plan_init(FdwRoutine *fdw_routine)
 {
 	fdw_routine->GetForeignRelSize	= pgstrom_get_foreign_rel_size;
 	fdw_routine->GetForeignPaths	= pgstrom_get_foreign_paths;

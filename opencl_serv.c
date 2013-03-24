@@ -65,11 +65,8 @@ pgstrom_opencl_main(void *arg)
 	proc_exit(0);
 }
 
-
-
-
 void
-pgstrom_opencl_init(void)
+pgstrom_opencl_server_init(void)
 {
 	BackgroundWorker    worker;
 

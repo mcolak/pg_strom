@@ -13,6 +13,7 @@
  */
 #include "postgres.h"
 #include "access/htup_details.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/heap.h"
 #include "catalog/index.h"
@@ -23,7 +24,6 @@
 #include "catalog/pg_type.h"
 #include "catalog/toasting.h"
 #include "commands/defrem.h"
-//#include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -40,10 +40,11 @@
 static ProcessUtility_hook_type next_process_utility_hook = NULL;
 
 #define ShadowRmapFmt			"shadow_%u_rmap"
-#define ShadowCstoreFmt			"shadow_%u_cstore"
-#define ShadowRstoreFmt			"shadow_%u_rstore"
 #define ShadowRmapIndexFmt		"shadow_%u_rmap_index"
-#define ShadowCstoreIndexFmt	"shadow_%u_cstore_index"
+#define ShadowCStoreFmt			"shadow_%u_cstore"
+#define ShadowCStoreIndexFmt	"shadow_%u_cstore_index"
+#define ShadowRStoreFmt			"shadow_%u_rstore"
+#define ShadowRStoreIndexFmt	"shadow_%u_rstore_index"
 
 static Relation
 open_shadow_relation(Relation frel, LOCKMODE lockmode,
@@ -94,19 +95,25 @@ pgstrom_open_shadow_rmap_index(Relation frel, LOCKMODE lockmode)
 Relation
 pgstrom_open_shadow_cstore(Relation frel, LOCKMODE lockmode)
 {
-	return open_shadow_relation(frel, lockmode, ShadowCstoreFmt, false);
+	return open_shadow_relation(frel, lockmode, ShadowCStoreFmt, false);
 }
 
 Relation
 pgstrom_open_shadow_cstore_index(Relation frel, LOCKMODE lockmode)
 {
-	return open_shadow_relation(frel, lockmode, ShadowCstoreIndexFmt, true);
+	return open_shadow_relation(frel, lockmode, ShadowCStoreIndexFmt, true);
 }
 
 Relation
 pgstrom_open_shadow_rstore(Relation frel, LOCKMODE lockmode)
 {
-	return open_shadow_relation(frel, lockmode, ShadowRstoreFmt, false);
+	return open_shadow_relation(frel, lockmode, ShadowRStoreFmt, false);
+}
+
+Relation
+pgstrom_open_shadow_rstore_index(Relation frel, LOCKMODE lockmode)
+{
+	return open_shadow_relation(frel, lockmode, ShadowRStoreIndexFmt, true);
 }
 
 bool
@@ -146,19 +153,18 @@ pgstrom_check_relation_compatible(Relation rel1, Relation rel2)
  * It creates an index relevant to shadow rowid-map or column-store.
  */
 static void
-pgstrom_create_shadow_index(Relation frel, Relation shadow_rel, bool is_cstore)
+pgstrom_create_shadow_index(const char *index_name,
+							Relation shadow_rel,
+							int num_attrs, Form_pg_attribute attrs[])
 {
-	char		idx_name[NAMEDATALEN + 1];
-	IndexInfo  *idx_info;
-	Oid			collationId[2];
-	Oid			opclassId[2];
-	int16		colOptions[2];
+	IndexInfo  *idx_info = makeNode(IndexInfo);
+	Oid		   *collationId = palloc0(sizeof(Oid) * num_attrs);
+	Oid		   *opclassId = palloc0(sizeof(Oid) * num_attrs);
+	int16	   *colOptions = palloc0(sizeof(int16) * num_attrs);
 	List	   *indexColNames = NIL;
+	int			i;
 
-	snprintf(idx_name, sizeof(idx_name),
-			 !is_cstore ? ShadowRmapIndexFmt : ShadowCstoreIndexFmt,
-			 RelationGetRelid(frel));
-	idx_info = makeNode(IndexInfo);
+	idx_info->ii_NumIndexAttrs = num_attrs;
 	idx_info->ii_Expressions = NIL;
 	idx_info->ii_ExpressionsState = NIL;
 	idx_info->ii_Predicate = NIL;
@@ -170,33 +176,19 @@ pgstrom_create_shadow_index(Relation frel, Relation shadow_rel, bool is_cstore)
 	idx_info->ii_ReadyForInserts = true;
 	idx_info->ii_Concurrent = false;
 	idx_info->ii_BrokenHotChain = false;
-	if (!is_cstore)
+	for (i=0; i < num_attrs; i++)
 	{
-		idx_info->ii_NumIndexAttrs = 1;
-		idx_info->ii_KeyAttrNumbers[0] = Anum_pg_strom_rmap_rowid;
-		opclassId[0] = GetDefaultOpClass(INT8OID, BTREE_AM_OID);
-		if (!OidIsValid(opclassId[0]))
-			elog(ERROR, "no default operator class found on (int8, btree)");
-		indexColNames = list_make1("rowid");
+		idx_info->ii_KeyAttrNumbers[i] = attrs[i]->attnum;
+		opclassId[i] = GetDefaultOpClass(attrs[i]->atttypid, BTREE_AM_OID);
+		if (!OidIsValid(opclassId[i]))
+			elog(ERROR, "no default operator class found on (%s,btree)",
+				 format_type_be(attrs[i]->atttypid));
+		indexColNames = lappend(indexColNames,
+								pstrdup(NameStr(attrs[i]->attname)));
 	}
-	else
-	{
-		idx_info->ii_NumIndexAttrs = 2;
-		idx_info->ii_KeyAttrNumbers[0] = Anum_pg_strom_cs_attnum;
-		idx_info->ii_KeyAttrNumbers[1] = Anum_pg_strom_cs_rowid;
-		opclassId[0] = GetDefaultOpClass(INT2OID, BTREE_AM_OID);
-		if (!OidIsValid(opclassId[0]))
-			elog(ERROR, "no default operator class found on (int2, btree)");
-		opclassId[1] = GetDefaultOpClass(INT8OID, BTREE_AM_OID);
-		if (!OidIsValid(opclassId[1]))
-			elog(ERROR, "no default operator class found on (int8, btree)");
-		indexColNames = list_make2("attnum", "rowid");
-	}
-	memset(collationId, 0, sizeof(collationId));
-	memset(colOptions, 0, sizeof(colOptions));
 
 	index_create(shadow_rel,		/* heapRelation */
-				 idx_name,			/* indexRelationName */
+				 index_name,		/* indexRelationName */
 				 InvalidOid,		/* indexRelationId */
 				 InvalidOid,		/* relFileNode */
 				 idx_info,			/* indexInfo */
@@ -215,6 +207,10 @@ pgstrom_create_shadow_index(Relation frel, Relation shadow_rel, bool is_cstore)
 				 false,				/* skip_build */
 				 false,				/* concurrent */
 				 true);				/* is_internal */
+
+	pfree(collationId);
+	pfree(opclassId);
+	pfree(colOptions);
 }
 
 /*
@@ -226,16 +222,16 @@ pgstrom_create_shadow_index(Relation frel, Relation shadow_rel, bool is_cstore)
 static void
 pgstrom_create_shadow_rmap(Relation frel)
 {
-	TupleDesc	tupdesc;
 	Oid			namespaceId;
+	char		namebuf[NAMEDATALEN + 1];
+	TupleDesc	tupdesc;
 	Oid			rmap_relid;
-	char		rmap_name[NAMEDATALEN + 1];
 	Relation	rmap_rel;
-	ObjectAddress	base;
-	ObjectAddress	this;
+	ObjectAddress base;
+	ObjectAddress this;
 
 	namespaceId = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
-	snprintf(rmap_name, sizeof(rmap_name), ShadowRmapFmt,
+	snprintf(namebuf, sizeof(namebuf), ShadowRmapFmt,
 			 RelationGetRelid(frel));
 
 	tupdesc = CreateTemplateTupleDesc(Natts_pg_strom_rmap, false);
@@ -247,7 +243,7 @@ pgstrom_create_shadow_rmap(Relation frel)
 					   "rowmap", BYTEAOID, -1, 0);
 	tupdesc->attrs[Anum_pg_strom_rmap_rowmap - 1]->attstorage = 'm';
 
-	rmap_relid = heap_create_with_catalog(rmap_name,
+	rmap_relid = heap_create_with_catalog(namebuf,
 										  namespaceId,
 										  InvalidOid,	/* tablespace */
 										  InvalidOid,	/* relationId */
@@ -282,13 +278,21 @@ pgstrom_create_shadow_rmap(Relation frel)
 	CommandCounterIncrement();
 
 	/* create a unique index on the "rowid" column */
+	snprintf(namebuf, sizeof(namebuf), ShadowRmapIndexFmt,
+			 RelationGetRelid(frel));
 	rmap_rel = heap_open(rmap_relid, NoLock);
-	pgstrom_create_shadow_index(frel, rmap_rel, false);
+	pgstrom_create_shadow_index(namebuf, rmap_rel,
+								1, RelationGetDescr(rmap_rel)->attrs);
 	heap_close(rmap_rel, NoLock);
-
+#if 0
+	/*
+	 * shadow rowmap table will never push its rowmap to external toast
+	 * relation (because PGSTROM_CHUNK_SIZE below the limitation), so
+	 * we don't need to create a relevant toast relation
+	 */
 	/* also, create a toast relation */
 	AlterTableCreateToastTable(rmap_relid, (Datum) 0);
-
+#endif
 	/* make this change visible */
 	CommandCounterIncrement();
 }
@@ -301,16 +305,16 @@ pgstrom_create_shadow_rmap(Relation frel)
 static void
 pgstrom_create_shadow_cstore(Relation frel)
 {
-	TupleDesc	tupdesc;
+	char		namebuf[NAMEDATALEN + 1];
 	Oid			namespaceId;
+	TupleDesc	tupdesc;
 	Oid			cs_relid;
-	char		cs_name[NAMEDATALEN + 1];
 	Relation	cs_rel;
 	ObjectAddress	base;
 	ObjectAddress	this;
 
 	namespaceId = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
-	snprintf(cs_name, sizeof(cs_name), ShadowCstoreFmt,
+	snprintf(namebuf, sizeof(namebuf), ShadowCStoreFmt,
 			 RelationGetRelid(frel));
 
 	tupdesc = CreateTemplateTupleDesc(Natts_pg_strom_cs, false);
@@ -327,7 +331,7 @@ pgstrom_create_shadow_cstore(Relation frel)
 	tupdesc->attrs[Anum_pg_strom_cs_isnull - 1]->attstorage = 'm';
 	tupdesc->attrs[Anum_pg_strom_cs_values - 1]->attstorage = 'm';
 
-	cs_relid = heap_create_with_catalog(cs_name,
+	cs_relid = heap_create_with_catalog(namebuf,
 										namespaceId,
 										InvalidOid,	/* tablespace */
 										InvalidOid,	/* relationId */
@@ -361,9 +365,12 @@ pgstrom_create_shadow_cstore(Relation frel)
 	/* make the new shadow table visible */
 	CommandCounterIncrement();
 
-	/* create a unique index on the "rowid" column */
+	/* create a unique index on the "attnum" and "rowid" column */
+	snprintf(namebuf, sizeof(namebuf), ShadowCStoreIndexFmt,
+			 RelationGetRelid(frel));
 	cs_rel = heap_open(cs_relid, NoLock);
-	pgstrom_create_shadow_index(frel, cs_rel, true);
+	pgstrom_create_shadow_index(namebuf, cs_rel,
+                                2, RelationGetDescr(cs_rel)->attrs);
 	heap_close(cs_rel, NoLock);
 
 	/* also, create a toast relation */
@@ -381,24 +388,36 @@ pgstrom_create_shadow_cstore(Relation frel)
 static void
 pgstrom_create_shadow_rstore(Relation frel)
 {
-	Oid		namespaceId;
-	char	rs_name[NAMEDATALEN + 1];
-	Oid		rs_relid;
-	ObjectAddress	base;
-	ObjectAddress	this;
+	Oid			namespaceId;
+	char		namebuf[NAMEDATALEN + 1];
+	TupleDesc	tupdesc;
+	Oid			rs_relid;
+	Relation	rs_rel;
+	ObjectAddress base;
+	ObjectAddress this;
+	Form_pg_attribute attr;
 
 	namespaceId = get_namespace_oid(PGSTROM_SCHEMA_NAME, false);
-	snprintf(rs_name, sizeof(rs_name), ShadowRstoreFmt,
+	snprintf(namebuf, sizeof(namebuf), ShadowRStoreFmt,
 			 RelationGetRelid(frel));
 
-	rs_relid = heap_create_with_catalog(rs_name,
+	/*
+	 * Add an oid system column to identify a particular tuple in
+	 * tuple store, because writable FDW in v9.3 requires to pack
+	 * a magic row-identifier within system ctid column that has
+	 * only 48bits width.
+	 */
+	tupdesc = CreateTupleDescCopy(RelationGetDescr(frel));
+	tupdesc->tdhasoid = true;
+
+	rs_relid = heap_create_with_catalog(namebuf,
 										namespaceId,
 										InvalidOid,	/* tablespace */
 										InvalidOid,	/* relationId */
 										InvalidOid,	/* reltypeId */
 										InvalidOid,	/* reloftypeid */
 										frel->rd_rel->relowner,
-										RelationGetDescr(frel),
+										tupdesc,
 										NIL,		/* constraints */
 										RELKIND_RELATION,
 										frel->rd_rel->relpersistence,
@@ -424,6 +443,14 @@ pgstrom_create_shadow_rstore(Relation frel)
 
 	/* make the new shadow table visible */
 	CommandCounterIncrement();
+
+	/* create a unique index on "oid" system column */
+	snprintf(namebuf, sizeof(namebuf), ShadowRStoreIndexFmt,
+			 RelationGetRelid(frel));
+	attr = SystemAttributeDefinition(ObjectIdAttributeNumber, true);
+	rs_rel = heap_open(rs_relid, NoLock);
+	pgstrom_create_shadow_index(namebuf, rs_rel, 1, &attr);
+	heap_close(rs_rel, NoLock);
 
 	/* also, create a toast relation */
 	AlterTableCreateToastTable(rs_relid, (Datum) 0);
@@ -548,7 +575,7 @@ cstore_post_drop_column(Relation frel, const char *colname)
 	 * name from underlying shadow row-store that has compatible table
 	 * layout.
 	 */
-	snprintf(namebuf, sizeof(namebuf), ShadowRstoreFmt,
+	snprintf(namebuf, sizeof(namebuf), ShadowRStoreFmt,
 			 RelationGetRelid(frel));
 	range = makeRangeVar(PGSTROM_SCHEMA_NAME, namebuf, -1);
 	attnum = get_attnum(RangeVarGetRelid(range, NoLock, false), colname);
@@ -629,7 +656,7 @@ pgstrom_post_alter_relation(Relation frel, AlterTableStmt *stmt,
 		AlterTableStmt *rs_stmt = makeNode(AlterTableStmt);
 		char		rs_name[NAMEDATALEN + 1];
 
-		snprintf(rs_name, sizeof(rs_name), ShadowRstoreFmt,
+		snprintf(rs_name, sizeof(rs_name), ShadowRStoreFmt,
 				 RelationGetRelid(frel));
 		rs_stmt->relation = makeRangeVar(PGSTROM_SCHEMA_NAME, rs_name, -1);
 		rs_stmt->cmds = rscmds;

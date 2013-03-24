@@ -12,6 +12,7 @@
  * within this package.
  */
 #include "postgres.h"
+#include "access/reloptions.h"
 #include "fmgr.h"
 #include "foreign/foreign.h"
 #include "miscadmin.h"
@@ -19,6 +20,11 @@
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
+
+#ifdef PGSTROM_PRINT_DEBUG
+/* for GUC pgstrom.print_debug */
+bool	pgstrom_pring_debug;
+#endif
 
 /*
  * Local declarations
@@ -28,7 +34,9 @@ void		_PG_init(void);
 static FdwRoutine	PgStromFdwHandlerData;
 
 /*
- * pgstrom_fdw_handler - FDW Handler function of PG-Strom
+ * pgstrom_fdw_handler
+ *
+ * It is provider of FDW routines of PG-Strom
  */
 Datum
 pgstrom_fdw_handler(PG_FUNCTION_ARGS)
@@ -36,6 +44,32 @@ pgstrom_fdw_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(&PgStromFdwHandlerData);
 }
 PG_FUNCTION_INFO_V1(pgstrom_fdw_handler);
+
+/*
+ * pgstrom_fdw_validator
+ *
+ * FDW option validator of PG-Strom, even though no options are
+ * not supported right now.
+ */
+Datum
+pgstrom_fdw_validator(PG_FUNCTION_ARGS)
+{
+	Datum		rawopts = PG_GETARG_DATUM(0);
+	List	   *options_list;
+	ListCell   *cell;
+
+	options_list = untransformRelOptions(rawopts);
+	foreach (cell, options_list)
+	{
+		DefElem *defel = lfirst(cell);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("invalid option \"%s\"", defel->defname)));
+	}
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pgstrom_fdw_validator);
 
 bool
 is_pgstrom_managed_server(const char *serv_name)
@@ -69,18 +103,29 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-	/* initialize planner/executor stuff */
+#ifdef PGSTROM_PRINT_DEBUG
+	/* allows debug output? */
+	DefineCustomBoolVariable("pg_strom.print_debug",
+							 "enables debug messaged of PG-Strom",
+							 NULL,
+							 &pgstrom_print_debug,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+#endif
+
+	/* Initialize FDW stuff */
 	memset(&PgStromFdwHandlerData, 0, sizeof(FdwRoutine));
 	PgStromFdwHandlerData.type = T_FdwRoutine;
-	pgstrom_planner_init(&PgStromFdwHandlerData);
-	pgstrom_executor_init(&PgStromFdwHandlerData);
+	pgstrom_fdw_plan_init(&PgStromFdwHandlerData);
+	pgstrom_fdw_scan_init(&PgStromFdwHandlerData);
+	pgstrom_fdw_modify_init(&PgStromFdwHandlerData);
 
-	/* initialize OpenCL computing server */
-	pgstrom_opencl_init();
+	/* Initialize OpenCL relevant stuff */
+	pgstrom_opencl_entry_init();
+	pgstrom_opencl_server_init();
 
-	/* initialize asynchronous columnizer worker */
-	pgstrom_columnizer_init();
-
-	/* register utility commands hooks */
+	/* Registration of utility command hooks */
 	pgstrom_utilcmds_init();
 }
