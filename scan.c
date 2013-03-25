@@ -13,9 +13,11 @@
  */
 #include "postgres.h"
 #include "access/sysattr.h"
+#include "access/xact.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "storage/bufmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -45,7 +47,6 @@ typedef struct {
 	List		   *varlena_cols;
 	List		   *host_cols;
 	uint32			vlbuf_size;
-	LOCKMODE		lockmode;
 	bool			needs_ctid;
 	bool			parallel_load;
 
@@ -59,6 +60,9 @@ typedef struct {
 	HeapScanDesc	rmap_scan;
 	IndexScanDesc  *cs_scan;
 	HeapScanDesc	rs_scan;
+
+	LOCKMODE		lockmode;
+	bool			lockmode_nowait;
 
 	/* current cstore window of this scan */
 	int				curr_index;
@@ -446,6 +450,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	List		   *union_cols = NIL;
 	uint32			vlbuf_size = 65536;	/* 64MB */
 	LOCKMODE		lockmode = AccessShareLock;
+	bool			lockmode_nowait = false;
 	bool			needs_ctid = false;
 	bool			parallel_load = false;
 	StromExecState *sestate;
@@ -496,20 +501,21 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 			else if (attnum == SelfItemPointerAttributeNumber)
 				needs_ctid = true;
 		}
-		else if (strcmp(defel->defname, "lockmode") == 0)
-		{
-			if (strcmp("read-only", strVal(defel->arg)) == 0)
-				lockmode = AccessShareLock;
-			else if (strcmp("read-lock", strVal(defel->arg)) == 0)
-				lockmode = RowShareLock;
-			else if (strcmp("read-write", strVal(defel->arg)) == 0)
-				lockmode = RowExclusiveLock;
-			else
-				elog(ERROR, "PG-Strom: unsupported planner's option: %s - %s",
-					 defel->defname, strVal(defel->arg));
-		}
 		else if (strcmp(defel->defname, "vlbuf_size") == 0)
 			vlbuf_size = intVal(defel->arg);
+		else if (strcmp(defel->defname, "lockmode") == 0)
+		{
+			if (strcmp(strVal(defel->arg), "nolock") == 0)
+				lockmode = AccessShareLock;
+			else if (strcmp(strVal(defel->arg), "shared") == 0)
+				lockmode = RowShareLock;
+			else if (strcmp(strVal(defel->arg), "exclusive") == 0)
+				lockmode = RowExclusiveLock;
+			else
+				elog(ERROR, "unexpected lockmode: %s", strVal(defel->arg));
+		}
+		else if (strcmp(defel->defname, "lockmode-nowait") == 0)
+			lockmode_nowait = intVal(defel->arg);
 		else
 			elog(ERROR, "PG-Strom: unsupported planner option: %s",
 				 defel->defname);
@@ -537,6 +543,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	sestate->host_cols = host_cols;
 	sestate->vlbuf_size = vlbuf_size;
 	sestate->lockmode = lockmode;
+	sestate->lockmode_nowait = lockmode_nowait;
 	sestate->needs_ctid = needs_ctid;
 	sestate->parallel_load = parallel_load;
 
@@ -545,8 +552,8 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	sestate->frel = frel;
 	sestate->rmap_rel = pgstrom_open_shadow_rmap(frel, lockmode);
 	sestate->rmap_idx = pgstrom_open_shadow_rmap_index(frel, lockmode);
-	sestate->cs_rel = pgstrom_open_shadow_cstore(frel, lockmode);
-	sestate->cs_idx = pgstrom_open_shadow_cstore_index(frel, lockmode);
+	sestate->cs_rel = pgstrom_open_shadow_cstore(frel, AccessShareLock);
+	sestate->cs_idx = pgstrom_open_shadow_cstore_index(frel, AccessShareLock);
 	sestate->rs_rel = pgstrom_open_shadow_rstore(frel, lockmode);
 	sestate->cs_scan = palloc0(sizeof(IndexScanDesc) * nattrs);
 
@@ -980,6 +987,7 @@ pgstrom_load_column_rowmap(StromExecState *sestate, ChunkBuffer *chunk)
 	toast_extract_datum(chunk->cb_rowmap,
 						(bytea *)DatumGetPointer(rowmap),
 						sizeof(bool) * nitems);
+	ItemPointerCopy(&tuple->t_self, &chunk->cs_ctid);
 
 	/* no need to load any more columns if parallel loading enabled */
 	if (sestate->parallel_load)
@@ -1100,6 +1108,134 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 }
 
 static bool
+pgstrom_shadow_locktuple(StromExecState *sestate, int index)
+{
+	EState		   *estate = sestate->estate;
+	ChunkBuffer	   *chunk = sestate->curr_chunk;
+	Relation		relation;
+	HeapTupleData	tuple;
+	HeapTuple		oldtup;
+	HeapTuple		newtup;
+	LockTupleMode	locktupmode;
+	Buffer			buffer;
+	HTSU_Result		result;
+	MemoryContext	oldcxt;
+	HeapUpdateFailureData hufd;
+
+	if (index < 0)
+	{
+		relation = sestate->rmap_rel;
+		ItemPointerCopy(&chunk->cs_ctid, &tuple.t_self);
+	}
+	else
+	{
+		relation = sestate->rs_rel;
+		oldtup = chunk->rs_cache[index];
+		ItemPointerCopy(&oldtup->t_self, &tuple.t_self);
+	}
+
+	Assert(sestate->lockmode > AccessShareLock);
+	if (sestate->lockmode == RowShareLock)
+		locktupmode = LockTupleShare;
+	else
+		locktupmode = LockTupleExclusive;
+
+	result = heap_lock_tuple(relation,
+							 &tuple,
+							 estate->es_output_cid,
+							 locktupmode,
+							 sestate->lockmode_nowait,
+							 true, &buffer, &hufd);
+	ReleaseBuffer(buffer);
+
+	Assert(result == HeapTupleSelfUpdated ||	/* updated by myself */
+		   result == HeapTupleMayBeUpdated ||	/* successfully locked */
+		   result == HeapTupleUpdated);			/* updated by someone */
+
+	if (result == HeapTupleSelfUpdated)
+	{
+		/* to avoid "Halloween problem" ? */
+		return false;
+	}
+	else if (result == HeapTupleUpdated)
+	{
+		if (IsolationUsesXactSnapshot())
+			ereport(ERROR,
+					(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+			errmsg("could not serialize access due to concurrent update")));
+
+		/* tuple was deleted, so don't return it */
+		if (ItemPointerEquals(&hufd.ctid, &tuple.t_self))
+			return false;
+
+		/* updated, so fetch and lock the updated version */
+		newtup = EvalPlanQualFetch(estate, relation, locktupmode,
+								   &hufd.ctid, hufd.xmax);
+
+		/* tuple was deleted, so don't return it */
+		if (!HeapTupleIsValid(newtup))
+			return false;
+
+		if (index < 0)
+		{
+			/*
+			 * In case when current chunk loads the contents of column-
+			 * store, only row-maps are updatable, even if someone run
+			 * UPDATE or DELETE command concurrently. So, calculation
+			 * results towards the column-store contents are still valid,
+			 * but some rows might be dropped due to the concurrent
+			 * commands. (Please note that PG-Strom implements UPDATE
+			 * command using a couple of operations; (1) drops a boolean
+			 * relevant to the target row on row-map, (2) insert a new
+			 * tuple into row-store.)
+			 * So, all we need to do when this chunk is updated is to
+			 * mask row-map using old rowmap (being already calculated)
+			 * AND new rowmap.
+			 */
+			TupleDesc	tupdesc = RelationGetDescr(relation);
+			Datum		values[Natts_pg_strom_rmap];
+			bool		isnull[Natts_pg_strom_rmap];
+			int64		new_rowid;
+			int32		new_nitems;
+			bytea	   *new_rowmap;
+			Datum	   *oldmap;
+			Datum	   *newmap;
+			Datum	   *endmap;
+
+			heap_deform_tuple(newtup, tupdesc, values, isnull);
+			new_rowid = DatumGetInt64(values[Anum_pg_strom_rmap_rowid-1]);
+			new_nitems = DatumGetInt32(values[Anum_pg_strom_rmap_nitems-1]);
+
+			if (chunk->rowid != new_rowid || chunk->nitems != new_nitems)
+				elog(ERROR, "bug? rowid/nitems of shadow rmap updated");
+
+			new_rowmap = DatumGetByteaPP(values[Anum_pg_strom_rmap_rowmap-1]);
+			newmap = (Datum *)VARDATA(new_rowmap);
+			oldmap = (Datum *)chunk->cb_rowmap;
+			endmap = (Datum *)(chunk->cb_rowmap + chunk->nitems);
+			while (oldmap < endmap)
+			{
+				*oldmap &= *newmap;
+				oldmap++;
+				newmap++;
+			}
+		}
+		else
+		{
+			HeapTuple	oldtup = chunk->rs_cache[index];
+
+			if (HeapTupleGetOid(oldtup) != HeapTupleGetOid(newtup))
+				elog(ERROR, "bug? oid of shadow row-store updated");
+
+			oldcxt = MemoryContextSwitchTo(chunk->rs_memcxt);
+			chunk->rs_cache[index] = heap_copytuple(newtup);
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+	return true;
+}
+
+static bool
 pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 {
 	ChunkBuffer	   *chunk = sestate->curr_chunk;
@@ -1134,6 +1270,15 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 		 */
 		if (chunk->rs_cache)
 		{
+			/* Row-level lock on the shadow row-store */
+			if (sestate->lockmode > AccessShareLock &&
+				!pgstrom_shadow_locktuple(sestate, curr_index))
+			{
+				curr_index++;
+				continue;
+			}
+
+			/* OK, let's back this tuple */
 			heap_deform_tuple(chunk->rs_cache[curr_index],
 							  slot->tts_tupleDescriptor,
 							  slot->tts_values,
@@ -1273,6 +1418,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		ChunkBuffer	*chunk;
 		dlist_node	*dnode;
 
+	next_chunk:
 		/*
 		 * Release varlena buffers being associated with the chunk-buffer
 		 * on which we already fetched, however, we don't release this
@@ -1294,6 +1440,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 
 			dlist_push_tail(&sestate->chunk_free_list, &chunk->chain);
 		}
+		sestate->curr_chunk = NULL;
 
 		/*
 		 * Try to dequeue a chunk from the receive queue to the ready list,
@@ -1413,6 +1560,17 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		Assert(!dlist_is_empty(&sestate->chunk_ready_list));
 		dnode = dlist_pop_head_node(&sestate->chunk_ready_list);
 		sestate->curr_chunk = dlist_container(ChunkBuffer, chain, dnode);
+
+		/*
+		 * Acquire tuple-level lock, if needed. In case when this chunk
+		 * loads contents from the shadow column-store, it is not capable
+		 * to lock them per rows guranuality because of its data format.
+		 * If row-store, it acquires locks per rows as literal.
+		 */
+		if (sestate->lockmode > AccessShareLock &&
+			!sestate->curr_chunk->rs_cache &&
+			!pgstrom_shadow_locktuple(sestate, -1))
+			goto next_chunk;
 	}
 	return slot;
 }

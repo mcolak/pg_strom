@@ -135,6 +135,7 @@ typedef struct {
 
 	HeapTuple	   *rs_cache;	/* !!private!! array for cache of row-store */
 	MemoryContext	rs_memcxt;	/* !!private!! memory for cache of row-store */
+	ItemPointerData	cs_ctid;	/* !!private!! ctid copy of this rowmap */
 
 	/*
 	 * Below fields may be transfered to another host
@@ -183,15 +184,57 @@ typedef struct {
 } VarlenaBuffer;
 
 typedef struct {
-	char				dev_name[64];
+	dlist_node	chain;
+	/* platform information */
+	char	   *pf_vendor;
+	char	   *pf_name;
+	char	   *pf_version;
+	/* device information */
+	uint32		dev_type;
+	char	   *dev_vendor;
+	uint32		dev_vendor_id;
+	char	   *dev_name;
+	char	   *dev_version;
+	char	   *dev_driver;
+	char	   *dev_opencl_c_version;
+	uint32		dev_address_bits;
+	uint32		dev_double_fp_config;
+	bool		dev_endian_little;
+	char	   *dev_extensions;
+	uint64		dev_global_mem_cache_size;
+	uint32		dev_global_mem_cache_type;
+	uint32		dev_global_mem_cacheline_size;
+	uint64		dev_global_mem_size;
+	bool		dev_host_unified_memory;
+	uint64		dev_local_mem_size;
+	uint32		dev_local_mem_type;
+	uint32		dev_max_clock_frequency;
+	uint32		dev_max_compute_units;
+	uint32		dev_max_constant_args;
+	uint64		dev_max_constant_buffer_size;
+	uint64		dev_max_mem_alloc_size;
+	size_t		dev_max_parameter_size;
+	size_t		dev_max_work_group_size;
+	size_t		dev_max_work_item_sizes[3];
+	uint32		dev_mem_base_addr_align;
+	uint32		dev_min_data_type_align_size;
+	uint32		dev_native_vector_width_char;
+	uint32		dev_native_vector_width_short;
+	uint32		dev_native_vector_width_int;
+	uint32		dev_native_vector_width_long;
+	uint32		dev_native_vector_width_float;
+	uint32		dev_native_vector_width_double;
+	uint32		dev_preferred_vector_width_char;
+	uint32		dev_preferred_vector_width_short;
+	uint32		dev_preferred_vector_width_int;
+	uint32		dev_preferred_vector_width_long;
+	uint32		dev_preferred_vector_width_float;
+	uint32		dev_preferred_vector_width_double;
+	size_t		dev_profiling_timer_resolution;
+	uint32		dev_queue_properties;
+	uint32		dev_single_fp_config;
+	char		data[0];
 } DeviceProperty;
-
-
-
-
-
-
-
 
 /* opencl_serv.c */
 extern void pgstrom_opencl_server_init(void);
@@ -253,9 +296,6 @@ extern Datum toast_save_datum(Relation rel, Datum value,
 extern void toast_delete_datum(Relation rel, Datum value);
 extern void toast_extract_datum(void *dest, struct varlena *value,
 								int32 length_be);
-
-
-
 
 /* main.c */
 extern bool is_pgstrom_managed_server(const char *serv_name);

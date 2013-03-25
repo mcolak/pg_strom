@@ -53,6 +53,11 @@ typedef struct {
 	dlist_head		addr_head;	/* list head of all nodes in address oder */
 	dlist_head		free_head;	/* list head of free blocks  */
 	pthread_mutex_t	lock;
+
+	/* for device properties */
+	dlist_head			dev_head;	/* head of device properties */
+	pthread_rwlock_t	dev_lock;	/* lock of device properties */
+
 	ShmemBlock		first_block[0];
 } ShmemHead;
 
@@ -756,8 +761,12 @@ pgstrom_shmem_startup(void)
 	pgstrom_shmem_head->free_size = pgstrom_shmem_head->total_size;
 	dlist_init(&pgstrom_shmem_head->free_head);
 	dlist_init(&pgstrom_shmem_head->addr_head);
-	if (pthread_mutex_init(&pgstrom_shmem_head->lock, &shmem_mutex_attr) != 0)
+	if (!pgstrom_mutex_init(&pgstrom_shmem_head->lock))
 		elog(ERROR, "failed to init mutex lock");
+
+	if (!pgstrom_rwlock_init(&pgstrom_shmem_head->dev_lock))
+		elog(ERROR, "failed to init read-write lock");
+	dlist_init(&pgstrom_shmem_head->dev_head);
 
 	/* init ShmemBlock as an empty big block */
 	block = pgstrom_shmem_head->first_block;

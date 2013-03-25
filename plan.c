@@ -19,6 +19,7 @@
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/var.h"
+#include "parser/parsetree.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
@@ -154,6 +155,7 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 	ListCell   *cell;
 	AttrNumber	attno;
 	DefElem	   *defel;
+	char	   *lockmode = NULL;
 
 	foreach (cell, baserel->baserestrictinfo)
 	{
@@ -190,13 +192,46 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 	while ((attno = bms_first_member(host_cols)) >= 0)
 	{
 		attno += FirstLowInvalidHeapAttributeNumber;
-		if (attno > 0)
+		defel = makeDefElem("host_cols", (Node *)makeInteger(attno));
+		fdw_private = lappend(fdw_private, defel);
+	}
+
+	/*
+	 * Choose an appropriate lock level on shadow table scan
+	 */
+	if (baserel->relid == root->parse->resultRelation &&
+		(root->parse->commandType == CMD_UPDATE ||
+		 root->parse->commandType == CMD_DELETE))
+		lockmode = "exclusive";
+	else
+	{
+		RowMarkClause *rowmark = get_parse_rowmark(root->parse,
+												   baserel->relid);
+		if (rowmark)
 		{
-			defel = makeDefElem("host_cols", (Node *)makeInteger(attno));
-			fdw_private = lappend(fdw_private, defel);
+			switch (rowmark->strength)
+			{
+				case LCS_FORKEYSHARE:
+				case LCS_FORSHARE:
+					lockmode = "shared";
+					break;
+				case LCS_FORNOKEYUPDATE:
+				case LCS_FORUPDATE:
+					lockmode = "exclusive";
+					break;
+			}
+			if (lockmode && rowmark->noWait)
+			{
+				defel = makeDefElem("lockmode-nowait",
+									(Node *) makeInteger(true));
+				fdw_private = lappend(fdw_private, defel);
+			}
 		}
-		else if (attno == SelfItemPointerAttributeNumber)
-			defel = makeDefElem("needs_ctid", (Node *) makeInteger(true));
+	}
+	if (lockmode)
+	{
+		defel = makeDefElem("lockmode", (Node *) makeString(lockmode));
+		fdw_private = lappend(fdw_private, defel);
 	}
 
 	return make_foreignscan(tlist,
