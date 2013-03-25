@@ -478,6 +478,8 @@ pgstrom_queue_alloc(bool abort_on_error)
 					 errmsg("failed to init mutex object")));
 		return NULL;
 	}
+	queue->is_shutdown = false;
+
 	/* add this block into private tracker */
 	dlist_push_tail(&shmem_private_track, &block->free_list);
 
@@ -499,15 +501,20 @@ pgstrom_queue_free(StromQueue *queue)
 	pgstrom_shmem_free(block);
 }
 
-void
+bool
 pgstrom_queue_enqueue(StromQueue *queue, dlist_node *chain)
 {
+	bool	result = true;
+
 	pthread_mutex_lock(&queue->lock);
-
-	dlist_push_tail(&queue->head, chain);
-
+	if (!queue->is_shutdown)
+		dlist_push_tail(&queue->head, chain);
+	else
+		result = false;
 	pthread_cond_signal(&queue->cond);
 	pthread_mutex_unlock(&queue->lock);
+
+	return result;
 }
 
 dlist_node *
@@ -557,6 +564,14 @@ pgstrom_queue_is_empty(StromQueue *queue)
 	pthread_mutex_unlock(&queue->lock);
 
 	return result;
+}
+
+void
+pgstrom_queue_shutdown(StromQueue *queue)
+{
+	pthread_mutex_lock(&queue->lock);
+	queue->is_shutdown = true;
+	pthread_mutex_unlock(&queue->lock);
 }
 
 /*

@@ -95,7 +95,7 @@ typedef struct {
 	dlist_head		head;
 	pthread_mutex_t	lock;
 	pthread_cond_t	cond;
-	ResourceOwner	owner;
+	bool			is_shutdown;
 } StromQueue;
 
 typedef struct {
@@ -162,7 +162,7 @@ typedef struct {
 	 *   :
 	 * <variable buffer for calculation results>
 	 *   :
-	 * char         cb_rowmap[sizeof(bool) * nitems];
+	 * bool         cb_rowmap[sizeof(bool) * nitems];
 	 *   :
 	 * <variable buffer for calculation arguments>
 	 *   :
@@ -184,6 +184,7 @@ typedef struct {
 } VarlenaBuffer;
 
 typedef struct {
+	uint32		length;		/* for varlena header */
 	dlist_node	chain;
 	/* platform information */
 	char	   *pf_vendor;
@@ -261,11 +262,12 @@ extern void pgstrom_shmem_dump(void);
 extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern StromQueue *pgstrom_queue_alloc(bool abort_on_error);
 extern void pgstrom_queue_free(StromQueue *queue);
-extern void pgstrom_queue_enqueue(StromQueue *queue, dlist_node *chain);
+extern bool pgstrom_queue_enqueue(StromQueue *queue, dlist_node *chain);
 extern dlist_node *pgstrom_queue_dequeue(StromQueue *queue,
 										 unsigned int timeout);
 extern dlist_node *pgstrom_queue_try_dequeue(StromQueue *queue);
 extern bool pgstrom_queue_is_empty(StromQueue *queue);
+extern void pgstrom_queue_shutdown(StromQueue *queue);
 extern KernelParams *pgstrom_kernel_params_alloc(Size total_length,
 												 bool abort_on_error);
 extern void pgstrom_kernel_params_free(KernelParams *kernel_params);
