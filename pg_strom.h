@@ -17,6 +17,7 @@
 #include "lib/ilist.h"
 #include "foreign/fdwapi.h"
 #include "utils/resowner.h"
+#include <limits.h>
 #include <pthread.h>
 
 /* debug messages */
@@ -79,17 +80,6 @@ ItemPointerSetForRowid(HeapTuple tuple, int64 rowid)
 				   (rowid & 0x0000ffffUL));
 }
 
-static inline int64
-ItemPointerGetForRowid(HeapTuple tuple)
-{
-	ItemPointerData	temp;
-
-	ItemPointerCopy(&tuple->t_self, &temp);
-
-	return (((int64)temp.ip_blkid.bi_hi) << 32 |
-			((int64)temp.ip_blkid.bi_lo) << 16 |
-			((int64)temp.ip_posid));
-}
 
 typedef struct {
 	dlist_head		head;
