@@ -1229,7 +1229,7 @@ toast_compress_datum(Datum value)
 #endif
 
 /* ----------
- * toast_save_datum -
+ * toast_save_bytea -
  *
  *	Save one single datum into the secondary relation and return
  *	a Datum reference for it.
@@ -1240,8 +1240,8 @@ toast_compress_datum(Datum value)
  * options: options to be passed to heap_insert() for toast rows
  * ----------
  */
-Datum
-toast_save_datum(Relation rel, Datum value,
+bytea *
+toast_save_bytea(Relation rel, bytea *value,
 				 struct varlena * oldexternal, int options)
 {
 	Relation	toastrel;
@@ -1466,18 +1466,18 @@ toast_save_datum(Relation rel, Datum value,
 	SET_VARSIZE_EXTERNAL(result, TOAST_POINTER_SIZE);
 	memcpy(VARDATA_EXTERNAL(result), &toast_pointer, sizeof(toast_pointer));
 
-	return PointerGetDatum(result);
+	return result;
 }
 
 
 /* ----------
- * toast_delete_datum -
+ * toast_delete_bytea -
  *
  *	Delete a single external stored value.
  * ----------
  */
 void
-toast_delete_datum(Relation rel, Datum value)
+toast_delete_bytea(Relation rel, bytea *value)
 {
 	struct varlena *attr = (struct varlena *) DatumGetPointer(value);
 	struct varatt_external toast_pointer;

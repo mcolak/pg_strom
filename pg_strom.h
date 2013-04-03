@@ -59,17 +59,20 @@ extern bool pgstrom_print_debug;
 	  - sizeof(int32)									\
 	  - VARHDRSZ) & ~(PGSTROM_ALIGN_SIZE - 1))
 
-#define PGSTROM_NITEMS_PER_TUPLE(attlen,attnotnull)						\
-	MAXALIGN_DOWN((MaximumBytesPerTuple(1)								\
-				   - MAXALIGN(offsetof(HeapTupleHeaderData, t_bits)		\
-							  + ((attnotnull)							\
-								 ? BITMAPLEN(Natts_pg_strom_cs) : 0))	\
-				   - sizeof(int16)										\
-				   - sizeof(int64)										\
-				   - sizeof(int32)										\
-				   - VARHDRSZ											\
-				   - (((attnotnull) ? 0 : VARHDRSZ)						\
-					  / ((attnotnull) ? (attlen) : (attlen) + 1)))
+/* data length that can be used to save isnull/values */
+#define PGSTROM_CSTORE_DATASZ										\
+	MAXALIGN_DOWN(MaximumBytesPerTuple(1)							\
+				  - MAXALIGN(offsetof(HeapTupleHeaderData, t_bits))	\
+				  - sizeof(int16)									\
+				  - sizeof(int64)									\
+				  - sizeof(int32)									\
+				  - VARHDRSZ										\
+				  - VARHDRSZ)
+
+#define PGSTROM_ROWID_MIN	\
+	(PGSTROM_CHUNK_SIZE * ((0x100000000ULL / PGSTROM_CHUNK_SIZE) + 1))
+#define PGSTROM_ROWID_MAX	\
+	(PGSTROM_CHUNK_SIZE * (0x1000000000000ULL / PGSTROM_CHUNK_SIZE))
 
 static inline void
 ItemPointerSetForRowid(HeapTuple tuple, int64 rowid)
@@ -283,11 +286,14 @@ extern bool pgstrom_check_relation_compatible(Relation rel1, Relation rel2);
 extern void pgstrom_utilcmds_init(void);
 
 /* toast.c */
-extern Datum toast_save_datum(Relation rel, Datum value,
-							  struct varlena * oldexternal, int options);
-extern void toast_delete_datum(Relation rel, Datum value);
+extern bytea *toast_save_bytea(Relation rel, bytea *value,
+							   struct varlena * oldexternal, int options);
+extern void toast_delete_bytea(Relation rel, bytea *value);
 extern void toast_extract_datum(void *dest, struct varlena *value,
 								int32 length_be);
+/* vacuum.c */
+extern Datum pgstrom_vacuum(PG_FUNCTION_ARGS);
+extern void pgstrom_vacuum_init(void);
 
 /* main.c */
 extern bool is_pgstrom_managed_server(const char *serv_name);

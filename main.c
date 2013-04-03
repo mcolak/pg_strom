@@ -114,6 +114,8 @@ _PG_init(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 #endif
+	/* Initialize shared memory management */
+	pgstrom_shmem_init();
 
 	/* Initialize FDW stuff */
 	memset(&PgStromFdwHandlerData, 0, sizeof(FdwRoutine));
@@ -128,4 +130,7 @@ _PG_init(void)
 
 	/* Registration of utility command hooks */
 	pgstrom_utilcmds_init();
+
+	/* Initialize vacuum stuff */
+	pgstrom_vacuum_init();
 }
