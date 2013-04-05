@@ -14,6 +14,8 @@
 #include "postgres.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
+#include "catalog/heap.h"
+#include "commands/explain.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
@@ -163,7 +165,7 @@ extract_kernel_params(EState *estate,
 											   c->constlen);
 					else
 						appendBinaryStringInfo(&str,
-										(char *)DatumGetByteaPP(c->constvalue),
+										(char *)DatumGetByteaP(c->constvalue),
 										VARSIZE_ANY(c->constvalue));
 				}
 				params_isnull[pindex] = false;
@@ -196,7 +198,7 @@ extract_kernel_params(EState *estate,
 											   typlen);
 					else
 						appendBinaryStringInfo(&str,
-										(char *)DatumGetByteaPP(ped->value),
+										(char *)DatumGetByteaP(ped->value),
 										VARSIZE_ANY(ped->value));
 				}
 				params_isnull[pindex] = false;
@@ -708,10 +710,10 @@ pgstrom_do_seek_window(StromExecState *sestate,
 	sestate->curr_cs_nitems[j] = new_nitems;
 	sestate->curr_cs_isnull[j]
 		= (!isnull[Anum_pg_strom_cs_isnull - 1]
-		   ? DatumGetByteaPP(values[Anum_pg_strom_cs_isnull - 1])
+		   ? DatumGetByteaPCopy(values[Anum_pg_strom_cs_isnull - 1])
 		   : NULL);
 	sestate->curr_cs_values[j]
-		= DatumGetByteaPP(values[Anum_pg_strom_cs_values - 1]);
+		= DatumGetByteaPCopy(values[Anum_pg_strom_cs_values - 1]);
 	MemoryContextSwitchTo(oldcxt);
 
 	return true;
@@ -1201,6 +1203,7 @@ pgstrom_shadow_locktuple(StromExecState *sestate, int index)
 			Datum	   *oldmap;
 			Datum	   *newmap;
 			Datum	   *endmap;
+			Datum		temp;
 
 			heap_deform_tuple(newtup, tupdesc, values, isnull);
 			new_rowid = DatumGetInt64(values[Anum_pg_strom_rmap_rowid-1]);
@@ -1209,7 +1212,8 @@ pgstrom_shadow_locktuple(StromExecState *sestate, int index)
 			if (chunk->rowid != new_rowid || chunk->nitems != new_nitems)
 				elog(ERROR, "bug? rowid/nitems of shadow rmap updated");
 
-			new_rowmap = DatumGetByteaPP(values[Anum_pg_strom_rmap_rowmap-1]);
+			temp = values[Anum_pg_strom_rmap_rowmap - 1];
+			new_rowmap = DatumGetByteaPCopy(temp);
 			newmap = (Datum *)VARDATA(new_rowmap);
 			oldmap = (Datum *)chunk->cb_rowmap;
 			endmap = (Datum *)(chunk->cb_rowmap + chunk->nitems);
@@ -1593,11 +1597,15 @@ static void
 pgstrom_end_foreign_scan(ForeignScanState *fss)
 {
 	StromExecState *sestate = (StromExecState *)fss->fdw_state;
-	TupleDesc		tupdesc = RelationGetDescr(sestate->frel);
+	TupleDesc		tupdesc;
 	dlist_mutable_iter iter;
 	dlist_node	   *dnode;
 	ChunkBuffer	   *chunk;
 	int				j;
+
+	/* if sestate is NULL, we are in EXPLAIN; nothing to do */
+	if (sestate == NULL)
+		return;
 
 	/*
 	 * Release chunk-buffers
@@ -1646,6 +1654,8 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 	/* scan cleanup */
 	if (sestate->rmap_scan != NULL)
 		heap_endscan(sestate->rmap_scan);
+
+	tupdesc = RelationGetDescr(sestate->frel);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		if (sestate->cs_scan[j])
@@ -1666,10 +1676,83 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 }
 
 static void
-pgstrom_explain_foreign_scan(ForeignScanState *node,
+pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 struct ExplainState *es)
 {
-	elog(ERROR, "not implemented yet");
+	ForeignScan	   *fscan = (ForeignScan *)fss->ss.ps.plan;
+	TupleDesc		tupdesc = RelationGetDescr(fss->ss.ss_currentRelation);
+	bytea		   *kernel_source = NULL;
+	text		   *kernel_quals = NULL;
+	List		   *kernel_params = NIL;
+	List		   *kernel_cols = NIL;
+	List		   *host_cols = NIL;
+	ListCell	   *cell;
+	StringInfoData	buf;
+	Form_pg_attribute attr;
+
+	/*
+     * Fetch planner's information
+     */
+	foreach (cell, fscan->fdw_private)
+	{
+		DefElem	   *defel = (DefElem *) lfirst(cell);
+
+		if (strcmp(defel->defname, "kernel_source") == 0)
+			kernel_source = DatumGetByteaP(((Const *)defel->arg)->constvalue);
+		else if (strcmp(defel->defname, "kernel_quals") == 0)
+			kernel_quals = DatumGetTextP(((Const *)defel->arg)->constvalue);
+		else if (strcmp(defel->defname, "kernel_params") == 0)
+			kernel_params = lappend(kernel_params, defel->arg);
+		else if (strcmp(defel->defname, "kernel_cols") == 0)
+			kernel_cols = lappend_int(kernel_cols, intVal(defel->arg));
+		else if (strcmp(defel->defname, "host_cols") == 0)
+			host_cols = lappend_int(host_cols, intVal(defel->arg));
+	}
+
+	/* Dump host columns */
+	initStringInfo(&buf);
+	foreach (cell, host_cols)
+	{
+		AttrNumber	attnum = lfirst_int(cell);
+
+		if (attnum > 0)
+			attr = tupdesc->attrs[attnum - 1];
+		else
+			attr = SystemAttributeDefinition(attnum, true);
+
+		appendStringInfo(&buf, "%s%s",
+						 buf.len > 0 ? ", " : "",
+						 NameStr(attr->attname));
+	}
+	ExplainPropertyText("Host columns", buf.data, es);
+
+	/* Dump kernel columns */
+	resetStringInfo(&buf);
+	foreach (cell, kernel_cols)
+	{
+		AttrNumber	attnum = lfirst_int(cell);
+
+		if (attnum > 0)
+			attr = tupdesc->attrs[attnum - 1];
+		else
+			attr = SystemAttributeDefinition(attnum, true);
+
+		appendStringInfo(&buf, "%s%s",
+						 buf.len > 0 ? ", " : "",
+						 NameStr(attr->attname));
+	}
+	ExplainPropertyText("Kernel columns", buf.data, es);
+
+	/* Dump qualifier of this scan */
+	if (!es->verbose)
+	{
+		if (kernel_quals)
+			ExplainPropertyText("Kernel quals", VARDATA(kernel_quals), es);
+	}
+	else
+	{
+		elog(ERROR, "not implemented now - kernel_source: %p", kernel_source);
+	}
 }
 
 void

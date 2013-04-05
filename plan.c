@@ -112,7 +112,7 @@ fixup_whole_row_reference(PlannerInfo *root, Index rtindex, Bitmapset *columns)
 	AttrNumber		attno, nattrs;
 
 	attno = InvalidAttrNumber - FirstLowInvalidHeapAttributeNumber;
-	if (bms_is_member(attno, columns))
+	if (!bms_is_member(attno, columns))
 		return columns;
 
 	rte = root->simple_rte_array[rtindex];
@@ -187,7 +187,7 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 	}
 
 	pull_varattnos((Node *)host_quals, baserel->relid, &host_cols);
-    pull_varattnos((Node *)tlist, baserel->relid, &host_cols);
+	pull_varattnos((Node *)baserel->reltargetlist, baserel->relid, &host_cols);
 	host_cols = fixup_whole_row_reference(root, baserel->relid, host_cols);
 	while ((attno = bms_first_member(host_cols)) >= 0)
 	{
