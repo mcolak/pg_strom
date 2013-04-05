@@ -174,6 +174,8 @@ get_new_rowid(VacuumState *vstate)
 			}
 		}
 		vstate->rowid_usage = lengthof(vstate->rowid_cache);
+
+		index_endscan(scan);
 	}
 	return vstate->rowid_cache[--vstate->rowid_usage];
 }
@@ -209,12 +211,9 @@ flush_numeric_to_column_store(VacuumState *vstate, Form_pg_attribute attr,
 		if (cs_rowid + cs_nitems > new_rowid + new_nitems)
 			cs_nitems = new_rowid - cs_rowid + new_nitems;
 
-		if (attr->attnotnull)
-			cs_isnull = NULL;
-		else
+		cs_isnull = NULL;
+		if (!attr->attnotnull)
 		{
-			cs_isnull = NULL;
-
 			for (k=0; k < cs_nitems; k++)
 			{
 				if (vstate->cs_isnull[j][i+k])
@@ -295,7 +294,7 @@ flush_varlena_to_column_store(VacuumState *vstate, Form_pg_attribute attr,
 	bool		has_null = false;
 	bool		v_isnull[PGSTROM_CHUNK_SIZE];
 	uint16		v_offset[PGSTROM_CHUNK_SIZE];
-	int			i, k, base;
+	int			i, k, base, shift;
 	AttrNumber	j = attr->attnum - 1;
 	StringInfoData buf;
 
@@ -315,32 +314,23 @@ flush_varlena_to_column_store(VacuumState *vstate, Form_pg_attribute attr,
 			v_body = NULL;
 		else
 		{
-			uncompress = DatumGetByteaPP(vstate->cs_values[j][i]);
+			uncompress = DatumGetByteaPCopy(vstate->cs_values[j][i]);
 			if (VARSIZE(uncompress) > TOAST_TUPLE_THRESHOLD)
 			{
 				v_body = toast_save_bytea(vstate->cs_rel,
 										  uncompress, NULL, 0);
 			}
 			else
-			{
-				v_body = toast_compress_bytea(uncompress);
-				if (!v_body)
-					v_body = uncompress;
-			}
+				v_body = uncompress;
 		}
 
 		if (i == new_nitems ||
-			MAXALIGN((has_null || !v_body
-					  ? (sizeof(bool) * (nitems + 1)) : 0)
-					 + (sizeof(uint16) * (nitems + 1))
-					 + buf.len
-					 + VARSIZE(v_body)) > PGSTROM_CSTORE_DATASZ)
+			MAXALIGN((has_null || !v_body) ? sizeof(bool) * (nitems + 1) : 0)
+			+ MAXALIGN(sizeof(uint16) * (nitems + 1))
+			+ MAXALIGN(!v_body ? 0 : VARSIZE_ANY(v_body))
+			+ buf.len > PGSTROM_CSTORE_DATASZ)
 		{
-			int		shift = sizeof(uint16) * nitems;
-			int		length;
-
-			for (k=0; k < nitems; k++)
-				v_offset[k] += shift;
+			size_t	length;
 
 			memset(isnull, 0, sizeof(isnull));
 			memset(values, 0, sizeof(values));
@@ -361,23 +351,37 @@ flush_varlena_to_column_store(VacuumState *vstate, Form_pg_attribute attr,
 				cs_isnull = toast_compress_bytea(uncompress);
 				if (!cs_isnull)
 					cs_isnull = uncompress;
+				else if (VARSIZE(cs_isnull) > length / 2)
+					cs_isnull = uncompress;
+
 				values[Anum_pg_strom_cs_isnull - 1]
 					= PointerGetDatum(cs_isnull);
 			}
 
-			length = VARHDRSZ + sizeof(uint16) * nitems + buf.len;
+			shift = MAXALIGN(sizeof(uint16) * nitems);
+			for (k=0; k < nitems; k++)
+				v_offset[k] += shift;
+			length = VARHDRSZ + MAXALIGN(sizeof(uint16) * nitems) + buf.len;
+
 			uncompress = palloc(length);
 			memcpy(VARDATA(uncompress), v_offset, sizeof(uint16) * nitems);
-			memcpy(VARDATA(uncompress) + sizeof(uint16) * nitems,
-				   buf.data, buf.len);
+			if (sizeof(uint16) * nitems != shift)
+				memset(VARDATA(uncompress) + sizeof(uint16) * nitems,
+					   0,
+					   shift - sizeof(uint16) * nitems);
+			memcpy(VARDATA(uncompress) + shift, buf.data, buf.len);
+
 			SET_VARSIZE(uncompress, length);
 			cs_values = toast_compress_bytea(uncompress);
 			if (!cs_values)
 				cs_values = uncompress;
-			values[Anum_pg_strom_cs_values - 1]
-				= PointerGetDatum(cs_values);
+			else if (VARSIZE(cs_values) > length / 2)
+				cs_values = uncompress;
+
+			values[Anum_pg_strom_cs_values - 1] = PointerGetDatum(cs_values);
 
 			tuple = heap_form_tuple(tupdesc, values, isnull);
+			Assert(tuple->t_len <= MaximumBytesPerTuple(1));
 			simple_heap_insert(vstate->cs_rel, tuple);
 			CatalogIndexInsert(vstate->cs_idxst, tuple);
 
@@ -400,7 +404,7 @@ flush_varlena_to_column_store(VacuumState *vstate, Form_pg_attribute attr,
 		{
 			v_isnull[nitems] = false;
 			v_offset[nitems] = buf.len;
-			appendBinaryStringInfo(&buf, (char *)v_body, VARSIZE(v_body));
+			appendBinaryStringInfo(&buf, (char *)v_body, VARSIZE_ANY(v_body));
 		}
 	}
 }
@@ -428,10 +432,10 @@ flush_vstate_to_column_store(VacuumState *vstate)
 	 */
 	new_rowid = get_new_rowid(vstate);
 	new_nitems = vstate->cs_nitems;
-	length = sizeof(uint32) + sizeof(bool) * new_nitems;
+	length = VARHDRSZ + sizeof(bool) * new_nitems;
 	uncompress = palloc(length);
 	SET_VARSIZE(uncompress, length);
-	memset(VARDATA(uncompress), -1, length);
+	memset(VARDATA(uncompress), -1, sizeof(bool) * new_nitems);
 	new_rowmap = toast_compress_bytea(uncompress);
 	if (!new_rowmap)
 		new_rowmap = uncompress;
@@ -473,13 +477,14 @@ flush_vstate_to_column_store(VacuumState *vstate)
 	}
 }
 
-static void
+static int
 flush_vstate_to_row_store(VacuumState *vstate)
 {
 	TupleDesc	rs_tupdesc = RelationGetDescr(vstate->rs_rel);
 	Datum	   *rs_values = palloc(sizeof(Datum) * rs_tupdesc->natts);
 	bool	   *rs_isnull = palloc(sizeof(bool) * rs_tupdesc->natts);
 	HeapTuple	tuple;
+	int			count = 0;
 	int			i, j;
 
 	for (i=0; i < vstate->cs_nitems; i++)
@@ -507,10 +512,12 @@ flush_vstate_to_row_store(VacuumState *vstate)
 		tuple = heap_form_tuple(rs_tupdesc, rs_values, rs_isnull);
 		simple_heap_insert(vstate->rs_rel, tuple);
 		CatalogIndexInsert(vstate->rs_idxst, tuple);
+		count++;
 	}
+	return count;
 }
 
-static void
+static int
 reclaim_column_store(VacuumState *vstate,
 					 int64 curr_rowid, int32 curr_nitems, bool *curr_rowmap)
 {
@@ -521,7 +528,7 @@ reclaim_column_store(VacuumState *vstate,
 	HeapTuple	tuple;
 	bool	  **cb_isnull;
 	Datum	  **cb_values;
-	int			i;
+	int			i, count = 0;
 
 	cb_isnull = palloc0(sizeof(bool *) * nattrs);
 	cb_values = palloc0(sizeof(Datum *) * nattrs);
@@ -665,18 +672,21 @@ reclaim_column_store(VacuumState *vstate,
 			flush_vstate_to_column_store(vstate);
 
 			MemoryContextReset(vstate->memcxt);
+			count += vstate->cs_nitems;
 			vstate->cs_nitems = 0;
 		}
 	}
+	return count;
 }
 
-static void
+static int
 columnize_row_store(VacuumState *vstate, MemoryContext work_cxt)
 {
 	TupleDesc	tupdesc = RelationGetDescr(vstate->rs_rel);
 	HeapTuple	tuple;
 	Datum	   *rs_values;
 	bool	   *rs_isnull;
+	int			count = 0;
 	AttrNumber	j;
 
 	Assert(vstate->cs_nitems < PGSTROM_CHUNK_SIZE);
@@ -708,7 +718,7 @@ columnize_row_store(VacuumState *vstate, MemoryContext work_cxt)
 			{
 				size_t	length = (attr->attlen > 0
 								  ? attr->attlen
-								  : VARSIZE(rs_values[j]));
+								  : VARSIZE_ANY(rs_values[j]));
 				char   *temp = MemoryContextAlloc(vstate->memcxt, length);
 
 				memcpy(temp, DatumGetPointer(rs_values[j]), length);
@@ -726,15 +736,19 @@ columnize_row_store(VacuumState *vstate, MemoryContext work_cxt)
 		{
 			flush_vstate_to_column_store(vstate);
 
+			MemoryContextSwitchTo(oldcxt);
 			MemoryContextReset(vstate->memcxt);
+			MemoryContextReset(work_cxt);
+			count += vstate->cs_nitems;
 			vstate->cs_nitems = 0;
 		}
-		MemoryContextSwitchTo(oldcxt);
-		MemoryContextReset(work_cxt);
+		else
+			MemoryContextSwitchTo(oldcxt);
 	}
+	return count;
 }
 
-static void
+static int
 pgstrom_vacuum_relation(Relation relation)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
@@ -744,6 +758,7 @@ pgstrom_vacuum_relation(Relation relation)
 	HeapTuple		tuple;
 	MemoryContext	work_cxt;
 	MemoryContext	oldcxt;
+	int				count = 0;
 	int				j;
 
 	/*
@@ -789,7 +804,7 @@ pgstrom_vacuum_relation(Relation relation)
 										   ALLOCSET_DEFAULT_INITSIZE,
 										   ALLOCSET_DEFAULT_MAXSIZE);
 	work_cxt = AllocSetContextCreate(CurrentMemoryContext,
-									 "PG-Strom vacuum working ares",
+									 "PG-Strom vacuum working memory",
 									 ALLOCSET_DEFAULT_MINSIZE,
 									 ALLOCSET_DEFAULT_INITSIZE,
 									 ALLOCSET_DEFAULT_MAXSIZE);
@@ -818,8 +833,8 @@ pgstrom_vacuum_relation(Relation relation)
 
 		if (chunk_needs_reclaimed(cs_rowid, cs_nitems, cs_rowmap))
 		{
-			reclaim_column_store(vstate, cs_rowid, cs_nitems,
-								 (bool *)VARDATA(cs_rowmap));
+			count += reclaim_column_store(vstate, cs_rowid, cs_nitems,
+										  (bool *)VARDATA(cs_rowmap));
 
 			simple_heap_delete(vstate->rmap_rel, &tuple->t_self);
 		}
@@ -829,9 +844,9 @@ pgstrom_vacuum_relation(Relation relation)
 	/*
 	 * Scan the underlying row-store
 	 */
-	columnize_row_store(vstate, work_cxt);
+	count += columnize_row_store(vstate, work_cxt);
 	if (vstate->cs_nitems > 0)
-		flush_vstate_to_row_store(vstate);
+		count += flush_vstate_to_row_store(vstate);
 
 	/*
 	 * Cleanup resources
@@ -863,6 +878,8 @@ pgstrom_vacuum_relation(Relation relation)
 	pfree(vstate->cs_values);
 	pfree(vstate->cs_isnull);
 	pfree(vstate->cs_rowmap);
+
+	return count;
 }
 
 Datum
@@ -870,6 +887,7 @@ pgstrom_vacuum(PG_FUNCTION_ARGS)
 {
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	relation;
+	int			count;
 
 	/*
 	 * Is this relation a foreign table managed by PG-Strom?
@@ -888,9 +906,11 @@ pgstrom_vacuum(PG_FUNCTION_ARGS)
 						RelationGetRelationName(relation))));
 
 	/* do the job */
-	pgstrom_vacuum_relation(relation);
+	count = pgstrom_vacuum_relation(relation);
 
-	PG_RETURN_VOID();
+	heap_close(relation, NoLock);
+
+	PG_RETURN_INT32(count);
 }
 PG_FUNCTION_INFO_V1(pgstrom_vacuum);
 

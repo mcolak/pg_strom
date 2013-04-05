@@ -491,7 +491,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 		}
 		else if (strcmp(defel->defname, "host_cols") == 0)
 		{
-			AttrNumber	attnum = lfirst_int(cell);
+			AttrNumber	attnum = intVal(defel->arg);
 
 			if (attnum > tupdesc->natts)
 				elog(ERROR, "columns referenced by host out of range: %d",
@@ -1283,6 +1283,7 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 							  slot->tts_tupleDescriptor,
 							  slot->tts_values,
 							  slot->tts_isnull);
+			slot = ExecStoreVirtualTuple(slot);
 			if (sestate->needs_ctid)
 			{
 				tuple = ExecMaterializeSlot(slot);
@@ -1390,6 +1391,7 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 				}
 			}
 		}
+		slot = ExecStoreVirtualTuple(slot);
 
 		/*
 		 * Also return an rowid, if required.
@@ -1560,6 +1562,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		Assert(!dlist_is_empty(&sestate->chunk_ready_list));
 		dnode = dlist_pop_head_node(&sestate->chunk_ready_list);
 		sestate->curr_chunk = dlist_container(ChunkBuffer, chain, dnode);
+		sestate->curr_index = 0;
 
 		/*
 		 * Acquire tuple-level lock, if needed. In case when this chunk
@@ -1599,6 +1602,13 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 	/*
 	 * Release chunk-buffers
 	 */
+	if (sestate->curr_chunk)
+	{
+		pgstrom_chunk_buffer_free(sestate->curr_chunk);
+		sestate->num_total_chunks--;
+		sestate->curr_chunk = NULL;
+	}
+
 	dlist_foreach_modify(iter, &sestate->chunk_free_list)
 	{
 		chunk = dlist_container(ChunkBuffer, chain, iter.cur);
@@ -1612,6 +1622,7 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 		sestate->num_total_chunks--;
 	}
 	Assert(sestate->num_total_chunks == sestate->num_running_chunks);
+
 	while (sestate->num_running_chunks > 0)
 	{
 		dnode = pgstrom_queue_dequeue(sestate->recvq, 0);
@@ -1626,7 +1637,8 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 		sestate->num_total_chunks--;
 	}
 	/* release kernel-params object */
-	pgstrom_kernel_params_free(sestate->kernel_params);
+	if (sestate->kernel_params)
+		pgstrom_kernel_params_free(sestate->kernel_params);
 
 	/* release receive queue */
 	pgstrom_queue_free(sestate->recvq);

@@ -123,9 +123,14 @@ pgstrom_check_relation_compatible(Relation rel1, Relation rel2)
 	TupleDesc	tupdesc2 = RelationGetDescr(rel2);
 	int			i;
 
-	if (tupdesc1->natts != tupdesc2->natts ||
-		tupdesc1->tdhasoid != tupdesc2->tdhasoid)
+	if (tupdesc1->natts != tupdesc2->natts)
 		return false;
+
+	/*
+	 * Note: we don't check tdhasoid here, because shadow row-store shall
+	 * have oid system column but foreign table does not.
+	 * It is an intentional difference.
+	 */
 
 	for (i=0; i < tupdesc1->natts; i++)
 	{
@@ -328,8 +333,13 @@ pgstrom_create_shadow_cstore(Relation frel)
 					   "isnull", BYTEAOID, -1, 0);
 	TupleDescInitEntry(tupdesc, Anum_pg_strom_cs_values,
 					   "values", BYTEAOID, -1, 0);
-	tupdesc->attrs[Anum_pg_strom_cs_isnull - 1]->attstorage = 'm';
-	tupdesc->attrs[Anum_pg_strom_cs_values - 1]->attstorage = 'm';
+	/*
+	 * Datum in column-store shall be toasted by PG-Strom itself,
+	 * so its attstorage is set to 'plane' to prevent unexpected
+	 * external save.
+	 */
+	tupdesc->attrs[Anum_pg_strom_cs_isnull - 1]->attstorage = 'p';
+	tupdesc->attrs[Anum_pg_strom_cs_values - 1]->attstorage = 'p';
 
 	cs_relid = heap_create_with_catalog(namebuf,
 										namespaceId,
