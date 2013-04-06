@@ -16,6 +16,19 @@ CREATE FUNCTION pgstrom_vacuum(regclass)
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_shmem_dump AS (
+  block_type text,
+  block_size int8,
+  start_addr text,
+  end_addr   text,
+  owned_by   int4,
+  overrun    bool
+);
+CREATE FUNCTION pgstrom_shmem_dump()
+  RETURNS SETOF __pgstrom_shmem_dump
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE FOREIGN DATA WRAPPER pg_strom
   HANDLER pgstrom_fdw_handler
   VALIDATOR pgstrom_fdw_validator;

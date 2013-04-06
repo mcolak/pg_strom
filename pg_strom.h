@@ -91,7 +91,6 @@ ItemPointerSetForRowid(HeapTuple tuple, int64 rowid)
 				   (rowid & 0x0000ffffUL));
 }
 
-
 typedef struct {
 	dlist_head		head;
 	pthread_mutex_t	lock;
@@ -259,8 +258,6 @@ extern bool pgstrom_rwlock_init(pthread_rwlock_t *rwlock);
 extern bool pgstrom_cond_init(pthread_cond_t *cond, pthread_mutex_t *mutex);
 extern bool pgstrom_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 							  unsigned int timeout);
-extern void pgstrom_shmem_dump(void);
-extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern StromQueue *pgstrom_queue_alloc(bool abort_on_error);
 extern void pgstrom_queue_free(StromQueue *queue);
 extern bool pgstrom_queue_enqueue(StromQueue *queue, dlist_node *chain);
@@ -279,6 +276,8 @@ extern VarlenaBuffer *pgstrom_varlena_buffer_alloc(Size total_length,
 												   bool abort_on_error);
 extern void pgstrom_varlena_buffer_free(VarlenaBuffer *vlbuf);
 extern void pgstrom_shmem_init(void);
+extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
+extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
 
 /* utilcmds.c */
 extern Relation pgstrom_open_shadow_rmap(Relation frel, LOCKMODE lockmode);

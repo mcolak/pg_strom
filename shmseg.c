@@ -12,7 +12,10 @@
  * within this package.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "storage/ipc.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_strom.h"
@@ -268,6 +271,7 @@ pgstrom_shmem_alloc(uint32 magic, Size size)
 			Assert((magic & SHMEM_BLOCK_USED_MASK) == SHMEM_BLOCK_USED);
 			block->magic = magic;
 			block->size = required;
+			pgstrom_shmem_head->free_size -= block->size;
 		}
 		break;
 	}
@@ -280,76 +284,6 @@ pgstrom_shmem_alloc(uint32 magic, Size size)
 		SHMEM_BLOCK_OVERRUN_MARKER(block) = SHMEM_BLOCK_OVERRUN_MARK;
 	}
 	return block;
-}
-
-void
-pgstrom_shmem_dump(void)
-{
-	dlist_iter	iter;
-
-	pthread_mutex_lock(&pgstrom_shmem_head->lock);
-	elog(INFO, "0x%p - 0x%p size: %lu, used-size: %lu, free-size: %lu",
-		 pgstrom_shmem_head,
-		 ((char *)pgstrom_shmem_head)
-		 + offsetof(ShmemHead, first_block)
-		 + pgstrom_shmem_head->total_size,
-		 pgstrom_shmem_head->total_size,
-		 pgstrom_shmem_head->total_size - pgstrom_shmem_head->free_size,
-		 pgstrom_shmem_head->free_size);
-
-	dlist_foreach(iter, &pgstrom_shmem_head->addr_head)
-	{
-		ShmemBlock *block = dlist_container(ShmemBlock, addr_list, iter.cur);
-
-		if (block->magic == SHMEM_BLOCK_FREE)
-		{
-			elog(INFO, "0x%p - 0x%p size: %lu, type: free",
-				 block, ((char *)block) + block->size, block->size);
-		}
-		else
-		{
-			const char *block_type;
-			uint32		block_overrun;
-
-			switch (block->magic)
-			{
-				case SHMEM_BLOCK_STROM_QUEUE:
-					block_type = "strom-queue";
-					break;
-				case SHMEM_BLOCK_KERNEL_PARAMS:
-					block_type = "kernel_params";
-					break;
-				case SHMEM_BLOCK_CHUNK_BUFFER:
-					block_type = "chunk-buffer";
-					break;
-				case SHMEM_BLOCK_VARLENA_BUFFER:
-					block_type = "varlena-buffer";
-					break;
-				case SHMEM_BLOCK_DEVICE_PROPERTY:
-					block_type = "device-property";
-					break;
-				default:
-					block_type = "unknown";
-					break;
-			}
-			block_overrun = SHMEM_BLOCK_OVERRUN_MARKER(block);
-			elog(INFO, "0x%p - 0x%p size: %lu, "
-				 "used by pid: %u, type: %s, overrun: %s",
-				 block, ((char *)block) + block->size, block->size,
-				 block->pid, block_type,
-				 block_overrun != SHMEM_BLOCK_OVERRUN_MARK ? "yes" : "no");
-		}
-	}
-	pthread_mutex_unlock(&pgstrom_shmem_head->lock);
-}
-
-void
-pgstrom_shmem_range(uintptr_t *start, uintptr_t *end)
-{
-	*start = (uintptr_t) pgstrom_shmem_head;
-	*end   = (uintptr_t) pgstrom_shmem_head
-		+ offsetof(ShmemHead, first_block)
-		+ pgstrom_shmem_head->total_size;
 }
 
 /*
@@ -832,3 +766,205 @@ pgstrom_shmem_init(void)
 	/* registration of shared-memory cleanup handler  */
 	RegisterResourceReleaseCallback(pgstrom_shmem_cleanup, NULL);
 }
+
+void
+pgstrom_shmem_range(uintptr_t *start, uintptr_t *end)
+{
+	*start = (uintptr_t) pgstrom_shmem_head;
+	*end   = (uintptr_t) pgstrom_shmem_head
+		+ offsetof(ShmemHead, first_block)
+		+ pgstrom_shmem_head->total_size;
+}
+
+/*
+ * pgstrom_shmem_dump
+ *
+ * it dumps current usage of shared memory segment for debugging.
+ */
+typedef struct {
+	dlist_node	chain;
+	uint32		magic;
+	Size		size;
+	Datum		start;
+	Datum		end;
+	pid_t		pid;
+	bool		overrun;
+} shmem_dump_item;
+
+Datum
+pgstrom_shmem_dump(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	dlist_head		   *dump_list;
+	dlist_node		   *dnode;
+	shmem_dump_item	   *ditem;
+	HeapTuple			tuple;
+	Datum				values[6];
+	bool				isnull[6];
+	char				msgbuf[512];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		struct timespec	abstime;
+        struct timeval	tv;
+		int				rc;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(6, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "block_type",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "block_size",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "start_addr",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "end_addr",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "owned_by",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "overrun",
+						   BOOLOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		dump_list = palloc(sizeof(dlist_head));
+		dlist_init(dump_list);
+
+		gettimeofday(&tv, NULL);
+		abstime.tv_sec = tv.tv_sec + 10;
+		abstime.tv_nsec = tv.tv_usec * 1000;
+
+		rc = pthread_mutex_timedlock(&pgstrom_shmem_head->lock, &abstime);
+		if (rc != 0)
+		{
+			Assert(rc == ETIMEDOUT);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Bug? could not acquire lock on shared memory")));
+		}
+		PG_TRY();
+		{
+			dlist_iter			iter;
+			uint32				marker;
+
+			/* overview of shared memory segment */
+			ditem = palloc0(sizeof(shmem_dump_item));
+			ditem->magic = 1;	/* for total */
+			ditem->size = pgstrom_shmem_head->total_size;
+			ditem->start = PointerGetDatum((char *)pgstrom_shmem_head +
+										   offsetof(ShmemHead, first_block));
+			ditem->end = PointerGetDatum((char *)pgstrom_shmem_head +
+										 offsetof(ShmemHead, first_block) +
+										 pgstrom_shmem_head->total_size);
+			dlist_push_tail(dump_list, &ditem->chain);
+
+			/* total free size */
+			ditem = palloc0(sizeof(shmem_dump_item));
+			ditem->magic = 2;	/* for total free */
+			ditem->size = pgstrom_shmem_head->free_size;
+			dlist_push_tail(dump_list, &ditem->chain);
+
+			/* total used size */
+			ditem = palloc0(sizeof(shmem_dump_item));
+			ditem->magic = 3;	/* for total used */
+			ditem->size = (pgstrom_shmem_head->total_size -
+						   pgstrom_shmem_head->free_size);
+			dlist_push_tail(dump_list, &ditem->chain);
+
+			/* for each regular blocks */
+			dlist_foreach(iter, &pgstrom_shmem_head->addr_head)
+			{
+				ShmemBlock *block = dlist_container(ShmemBlock,
+													addr_list,
+													iter.cur);
+				ditem = palloc0(sizeof(shmem_dump_item));
+				ditem->magic = block->magic;
+				ditem->size = block->size;
+				ditem->start = PointerGetDatum(block);
+				ditem->end = PointerGetDatum((char *)block + block->size);
+				ditem->pid = block->pid;
+				marker = SHMEM_BLOCK_OVERRUN_MARKER(block);
+				ditem->overrun = (marker == SHMEM_BLOCK_OVERRUN_MARK);
+
+				dlist_push_tail(dump_list, &ditem->chain);
+			}
+		}
+		PG_CATCH();
+		{
+			pthread_mutex_unlock(&pgstrom_shmem_head->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		pthread_mutex_unlock(&pgstrom_shmem_head->lock);
+		MemoryContextSwitchTo(oldcxt);
+
+		fncxt->user_fctx = dump_list;
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	dump_list = (dlist_head *)fncxt->user_fctx;
+
+	if (dlist_is_empty(dump_list))
+		SRF_RETURN_DONE(fncxt);
+
+	dnode = dlist_pop_head_node(dump_list);
+	ditem = dlist_container(shmem_dump_item, chain, dnode);
+
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
+
+	switch (ditem->magic)
+	{
+		case 1:
+			values[0] = CStringGetTextDatum("total");
+			isnull[4] = isnull[5] = true;
+			break;
+		case 2:
+			values[0] = CStringGetTextDatum("total free");
+			isnull[2] = isnull[3] = isnull[4] = isnull[5] = true;
+			break;
+		case 3:
+			values[0] = CStringGetTextDatum("total used");
+			isnull[2] = isnull[3] = isnull[4] = isnull[5] = true;
+			break;
+		case SHMEM_BLOCK_FREE:
+			values[0] = CStringGetTextDatum("free block");
+			isnull[4] = true;
+			break;
+		case SHMEM_BLOCK_STROM_QUEUE:
+			values[0] = CStringGetTextDatum("strom queue");
+			break;
+		case SHMEM_BLOCK_KERNEL_PARAMS:
+			values[0] = CStringGetTextDatum("kernel params");
+			break;
+		case SHMEM_BLOCK_CHUNK_BUFFER:
+			values[0] = CStringGetTextDatum("chunk buffer");
+			break;
+		case SHMEM_BLOCK_VARLENA_BUFFER:
+			values[0] = CStringGetTextDatum("varlena buffer");
+			break;
+		case SHMEM_BLOCK_DEVICE_PROPERTY:
+			values[0] = CStringGetTextDatum("device property");
+			break;
+		default:
+			snprintf(msgbuf, sizeof(msgbuf),
+					 "unknown (magic = %08u)", ditem->magic);
+			values[0] = CStringGetTextDatum(msgbuf);
+			break;
+	}
+
+	values[1] = Int64GetDatum(ditem->size);
+	snprintf(msgbuf, sizeof(msgbuf), "%p", DatumGetPointer(ditem->start));
+	values[2] = CStringGetTextDatum(msgbuf);
+	snprintf(msgbuf, sizeof(msgbuf), "%p", DatumGetPointer(ditem->end));
+	values[3] = CStringGetTextDatum(msgbuf);
+	values[4] = Int32GetDatum(ditem->pid);
+	values[5] = BoolGetDatum(ditem->overrun);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_shmem_dump);
