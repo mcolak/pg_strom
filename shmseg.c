@@ -443,7 +443,7 @@ pgstrom_shmem_cleanup(ResourceReleasePhase phase,
 		if (block->owner != CurrentResourceOwner)
 			continue;
 
-		Assert(block->magic == SHMEM_BLOCK_KERNEL_PARAMS);
+		Assert(block->magic == SHMEM_BLOCK_STROM_QUEUE);
 		pgstrom_queue_free((StromQueue *)block->data);
 	}
 }
@@ -716,20 +716,17 @@ pgstrom_chunk_buffer_free(ChunkBuffer *chunk)
 	ShmemBlock *block = container_of(ShmemBlock, data, chunk);
 
 	Assert(block->magic == SHMEM_BLOCK_CHUNK_BUFFER);
+	Assert(block->pid == getpid());
 
 	/*
-	 * Note: we assume any chunk-buffers shall be released by the process
-	 * that acquired this buffer, thus, it is safe to touch rs_memcxt and
-	 * rs_cache pointers that have private pointers.
-	 * The assertion below is a test to check whether this context is
-	 * identical with the one on allocation.
+	 * NOTE: it does not care about local memory on rs_memcxt and rs_cache;
+	 * these shall be released by caller, or error cleanup callback.
+	 * Usually, these are acquired on per-query memory context, thus, these
+	 * objects are released automatically.
+	 * Also note that these objects shall be released prior to invocation
+	 * of this routine in case of error cleanup, so don't touch these
+	 * pointers
 	 */
-	Assert(block->pid == getpid());
-	if (chunk->rs_memcxt)
-		MemoryContextDelete(chunk->rs_memcxt);
-	if (chunk->rs_cache)
-		pfree(chunk->rs_cache);
-
 	dlist_foreach_modify(iter, &chunk->vlbuf_list)
 	{
 		VarlenaBuffer  *vlbuf

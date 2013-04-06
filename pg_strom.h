@@ -51,6 +51,14 @@ extern bool pgstrom_print_debug;
 #define Anum_pg_strom_cs_isnull		4
 #define Anum_pg_strom_cs_values		5
 
+/* index of shadow rmap(rowid) */
+#define Inum_pg_strom_rmap_rowid	1
+/* index of shadow column-store(attnum,rowid) */
+#define Inum_pg_strom_cs_attnum		1
+#define Inum_pg_strom_cs_rowid		2
+/* index of shadow row-store(oid) */
+#define Inum_pg_strom_rs_oid		1
+
 #define PGSTROM_ALIGN_SIZE		32
 #define PGSTROM_CHUNK_SIZE								\
 	((MaximumBytesPerTuple(1)							\

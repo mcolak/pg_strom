@@ -282,7 +282,7 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	 * +------------------------------+ <-----------+
 	 */
 	memset(chunk->cb_isnull, 0, sizeof(bool *) * tupdesc->natts);
-	memset(chunk->cb_isnull, 0, sizeof(void *) * tupdesc->natts);
+	memset(chunk->cb_values, 0, sizeof(void *) * tupdesc->natts);
 	memset(chunk->offset_isnull, 0, sizeof(uint32) * nfields);
 	memset(chunk->offset_values, 0, sizeof(uint32) * nfields);
 
@@ -656,11 +656,11 @@ pgstrom_do_seek_window(StromExecState *sestate,
 	if (!HeapTupleIsValid(tuple))
 	{
 		ScanKeyInit(&skeys[0],
-					Anum_pg_strom_cs_attnum,
+					Inum_pg_strom_cs_attnum,
 					BTEqualStrategyNumber, F_INT2EQ,
 					Int16GetDatum(attnum));
 		ScanKeyInit(&skeys[1],
-					Anum_pg_strom_cs_rowid,
+					Inum_pg_strom_cs_rowid,
 					BTLessEqualStrategyNumber, F_INT8LE,
 					Int64GetDatum(rowid));
 		index_rescan(sestate->cs_scan[j], skeys, 2, NULL, 0);
@@ -694,11 +694,11 @@ pgstrom_do_seek_window(StromExecState *sestate,
 		 * neighbor fetch.
 		 */
 		ScanKeyInit(&skeys[0],
-					Anum_pg_strom_cs_attnum,
+					Inum_pg_strom_cs_attnum,
 					BTEqualStrategyNumber, F_INT2EQ,
 					Int16GetDatum(attnum));
 		ScanKeyInit(&skeys[1],
-					Anum_pg_strom_cs_rowid,
+					Inum_pg_strom_cs_rowid,
 					BTGreaterStrategyNumber, F_INT8GT,
 					Int64GetDatum(new_rowid + new_nitems));
 		index_rescan(sestate->cs_scan[j], skeys, 2, NULL, 0);
@@ -748,11 +748,11 @@ pgstrom_load_column_store(StromExecState *sestate, ChunkBuffer *chunk,
 	pgstrom_invalidate_window(sestate, attr->attnum);
 
 	ScanKeyInit(&skeys[0],
-				Anum_pg_strom_cs_attnum,
+				Inum_pg_strom_cs_attnum,
 				BTEqualStrategyNumber, F_INT2EQ,
 				Int16GetDatum(attr->attnum));
 	ScanKeyInit(&skeys[1],
-				Anum_pg_strom_cs_rowid,
+				Inum_pg_strom_cs_rowid,
 				BTGreaterEqualStrategyNumber, F_INT8GE,
 				Int64GetDatum(chunk->rowid));
 
@@ -1290,8 +1290,11 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 			slot = ExecStoreVirtualTuple(slot);
 			if (sestate->needs_ctid)
 			{
+				Oid		rs_rowid;
+
+				rs_rowid = HeapTupleGetOid(chunk->rs_cache[curr_index]);
 				tuple = ExecMaterializeSlot(slot);
-				ItemPointerSetForRowid(tuple, HeapTupleGetOid(tuple));
+				ItemPointerSetForRowid(tuple, rs_rowid);
 			}
 			sestate->curr_index = curr_index + 1;
 			return true;
@@ -1609,21 +1612,23 @@ pgstrom_end_foreign_scan(ForeignScanState *fss)
 
 	/*
 	 * Release chunk-buffers
+	 *
+	 * NOTE: no need to release rs_memcxt and rs_cache of chunk-buffer,
+	 * because both of local memory should be acquired within per-query
+	 * memory context, thus, it shall be released automatically.
 	 */
 	if (sestate->curr_chunk)
 	{
 		pgstrom_chunk_buffer_free(sestate->curr_chunk);
 		sestate->num_total_chunks--;
-		sestate->curr_chunk = NULL;
 	}
-
-	dlist_foreach_modify(iter, &sestate->chunk_free_list)
+	dlist_foreach_modify(iter, &sestate->chunk_ready_list)
 	{
 		chunk = dlist_container(ChunkBuffer, chain, iter.cur);
 		pgstrom_chunk_buffer_free(chunk);
 		sestate->num_total_chunks--;
 	}
-	dlist_foreach_modify(iter, &sestate->chunk_ready_list)
+	dlist_foreach_modify(iter, &sestate->chunk_free_list)
 	{
 		chunk = dlist_container(ChunkBuffer, chain, iter.cur);
 		pgstrom_chunk_buffer_free(chunk);

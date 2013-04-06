@@ -175,9 +175,9 @@ row_delete_from_cstore(EState *estate, StromModifyState *smstate, int64 rowid)
 			= PointerGetDatum(smstate->curr_rowmap);
 		replaces[Anum_pg_strom_rmap_rowmap - 1] = true;
 
-		newtup = heap_modifytuple(smstate->curr_tuple,
-								  tupdesc,
-								  values, isnull, replaces);
+		newtup = heap_modify_tuple(smstate->curr_tuple,
+								   tupdesc,
+								   values, isnull, replaces);
 		/*
 		 * Note: we don't expect concurrent updates because scan.c always
 		 * acquires tuple-lock on reader side when UPDATE or DELETE command
@@ -195,7 +195,7 @@ row_delete_from_cstore(EState *estate, StromModifyState *smstate, int64 rowid)
 		pfree(smstate->curr_tuple);
 		pfree(smstate->curr_rowmap);
 		smstate->curr_tuple = NULL;
-		smstate->curr_rowid = -1;
+		smstate->curr_rowid =  0;
 		smstate->curr_nitems = 0;
 		smstate->curr_rowmap = NULL;
 	}
@@ -213,11 +213,11 @@ row_delete_from_cstore(EState *estate, StromModifyState *smstate, int64 rowid)
 			MemoryContext oldcxt;
 
 			ScanKeyInit(&skey,
-						Anum_pg_strom_rmap_rowid,
+						Inum_pg_strom_rmap_rowid,
 						BTLessEqualStrategyNumber, F_INT8LE,
 						Int64GetDatum(rowid));
-
 			index_rescan(smstate->rmap_scan, &skey, 1, NULL, 0);
+
 			tuple = index_getnext(smstate->rmap_scan, BackwardScanDirection);
 			if (!HeapTupleIsValid(tuple))
 				elog(ERROR, "failed to lookup rowmap for rowid=%" PRIu64,
@@ -237,7 +237,7 @@ row_delete_from_cstore(EState *estate, StromModifyState *smstate, int64 rowid)
 			smstate->curr_rowid = new_rowid;
 			smstate->curr_nitems = new_nitems;
 			smstate->curr_rowmap
-				= DatumGetByteaPP(values[Anum_pg_strom_rmap_rowmap - 1]);
+				= DatumGetByteaPCopy(values[Anum_pg_strom_rmap_rowmap - 1]);
 			smstate->curr_tuple = heap_copytuple(tuple);
 			MemoryContextSwitchTo(oldcxt);
 		}
@@ -280,7 +280,7 @@ row_update_on_rstore(EState *estate, StromModifyState *smstate,
 	HeapTuple		newtup;
 
 	ScanKeyInit(&skey,
-				ObjectIdAttributeNumber,
+				Inum_pg_strom_rs_oid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(rowid_oid));
 	index_rescan(smstate->rs_scan, &skey, 1, NULL, 0);
@@ -290,10 +290,10 @@ row_update_on_rstore(EState *estate, StromModifyState *smstate,
 		elog(ERROR, "failed to fetch a row-store tuple with oid=%u",
 			 rowid_oid);
 
-	heap_deform_tuple(oldtup, slot->tts_tupleDescriptor,
+	heap_deform_tuple(ExecMaterializeSlot(slot),
+					  slot->tts_tupleDescriptor,
 					  smstate->rs_values,
 					  smstate->rs_isnull);
-
 	newtup = heap_form_tuple(RelationGetDescr(smstate->rs_rel),
 							 smstate->rs_values,
 							 smstate->rs_isnull);
@@ -338,6 +338,8 @@ pgstrom_exec_foreign_update(EState *estate,
 	rowid = (((int64)temp.ip_blkid.bi_hi) << 32 |
 			 ((int64)temp.ip_blkid.bi_lo) << 16 |
 			 ((int64)temp.ip_posid));
+	if (rowid < PGSTROM_CHUNK_SIZE)
+		elog(INFO, "rowid = %ld", rowid);
 	Assert(rowid >= PGSTROM_CHUNK_SIZE);
 
 	if (rowid <= OID_MAX)

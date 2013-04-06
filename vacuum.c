@@ -116,7 +116,7 @@ get_new_rowid(VacuumState *vstate)
 		if (vstate->rowid_usage < 0)
 		{
 			ScanKeyInit(&skey,
-						Anum_pg_strom_rmap_rowid,
+						Inum_pg_strom_rmap_rowid,
 						BTLessEqualStrategyNumber, F_INT8LE,
 						Int64GetDatum(PGSTROM_ROWID_MAX));
 			index_rescan(scan, &skey, 1, NULL, 0);
@@ -137,7 +137,7 @@ get_new_rowid(VacuumState *vstate)
 			last_rowid = vstate->rowid_cache[0];
 
 		ScanKeyInit(&skey,
-					Anum_pg_strom_rmap_rowid,
+					Inum_pg_strom_rmap_rowid,
 					BTGreaterStrategyNumber, F_INT8GT,
 					Int64GetDatum(last_rowid));
 		index_rescan(scan, &skey, 1, NULL, 0);
@@ -167,7 +167,7 @@ get_new_rowid(VacuumState *vstate)
 			if (next_rowid == PGSTROM_ROWID_MAX && usage > 0)
 			{
 				ScanKeyInit(&skey,
-							Anum_pg_strom_rmap_rowid,
+							Inum_pg_strom_rmap_rowid,
 							BTGreaterEqualStrategyNumber, F_INT8GE,
 							Int64GetDatum(PGSTROM_ROWID_MIN));
 				index_rescan(scan, &skey, 1, NULL, 0);
@@ -537,15 +537,15 @@ reclaim_column_store(VacuumState *vstate,
 		Form_pg_attribute attr = frel_tupdesc->attrs[j];
 
 		ScanKeyInit(&skeys[0],
-					Anum_pg_strom_cs_attnum,
+					Inum_pg_strom_cs_attnum,
 					BTEqualStrategyNumber, F_INT2EQ,
 					Int16GetDatum(attr->attnum));
 		ScanKeyInit(&skeys[1],
-					Anum_pg_strom_cs_rowid,
+					Inum_pg_strom_cs_rowid,
 					BTGreaterEqualStrategyNumber, F_INT8GE,
 					Int64GetDatum(curr_rowid));
 		ScanKeyInit(&skeys[2],
-					Anum_pg_strom_cs_rowid,
+					Inum_pg_strom_cs_rowid,
 					BTLessStrategyNumber, F_INT8LT,
 					Int64GetDatum(curr_rowid + curr_nitems));
 		index_rescan(vstate->cs_scan, skeys, 3, NULL, 0);

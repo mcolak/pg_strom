@@ -600,7 +600,7 @@ cstore_post_drop_column(Relation frel, const char *colname)
 	cs_idx = pgstrom_open_shadow_cstore_index(frel, RowExclusiveLock);
 
 	ScanKeyInit(&ikey,
-				Anum_pg_strom_cs_attnum,
+				Inum_pg_strom_cs_attnum,
 				BTEqualStrategyNumber, F_INT2EQ,
 				Int16GetDatum(attnum));
 
