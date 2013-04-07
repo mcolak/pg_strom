@@ -29,19 +29,21 @@ CREATE FUNCTION pgstrom_shmem_dump()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_opencl_devices AS (
+  index      int,
+  attribute  text,
+  value      text
+);
+CREATE FUNCTION pgstrom_opencl_devices()
+  RETURNS SETOF __pgstrom_opencl_devices
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 CREATE FOREIGN DATA WRAPPER pg_strom
   HANDLER pgstrom_fdw_handler
   VALIDATOR pgstrom_fdw_validator;
 
 CREATE SERVER pg_strom FOREIGN DATA WRAPPER pg_strom;
-
-
---CREATE TYPE __pgstrom_gpu_info AS
---  (gpuid int, attr text, value text);
---CREATE FUNCTION pgstrom_gpu_info(int default -1)
---  RETURNS SETOF __pgstrom_gpu_info
---  AS 'MODULE_PATHNAME'
---  LANGUAGE C STRICT;
 
 --CREATE VIEW pgstrom_shadow_relations AS
 --  SELECT oid, relname, relkind, pg_relation_size(oid) AS relsize

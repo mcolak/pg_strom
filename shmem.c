@@ -679,6 +679,664 @@ pgstrom_chunk_buffer_free(ChunkBuffer *chunk)
 }
 
 /*
+ * pgstrom_device_property_alloc
+ *
+ * It allocate a DeviceProperty object on shared memory segment according
+ * to the supplied template.
+ */
+DeviceProperty *
+pgstrom_device_property_alloc(DeviceProperty *templ, bool abort_on_error)
+{
+	ShmemBlock	   *block;
+	DeviceProperty *devprop;
+	Size			length = sizeof(DeviceProperty);
+	Size			offset = 0;
+	int				i, rc;
+	static long		string_fields[] = {
+		offsetof(DeviceProperty, pf_profile),
+		offsetof(DeviceProperty, pf_vendor),
+		offsetof(DeviceProperty, pf_name),
+		offsetof(DeviceProperty, pf_version),
+		offsetof(DeviceProperty, pf_extensions),
+		offsetof(DeviceProperty, dev_profile),
+		offsetof(DeviceProperty, dev_vendor),
+		offsetof(DeviceProperty, dev_name),
+		offsetof(DeviceProperty, dev_version),
+		offsetof(DeviceProperty, dev_driver),
+		offsetof(DeviceProperty, dev_opencl_c_version),
+		offsetof(DeviceProperty, dev_extensions),
+	};
+
+	for (i=0; i < lengthof(string_fields); i++)
+	{
+		char  **field = (char **)((char *)templ + string_fields[i]);
+
+		if (*field)
+			length += strlen(*field) + 1;
+	}
+
+	block = pgstrom_shmem_alloc(SHMEM_BLOCK_DEVICE_PROPERTY, length);
+	if (!block)
+	{
+		if (abort_on_error)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_OUT_OF_MEMORY),
+					 errmsg("out of shared memory segment"),
+					 errhint("enlarge pg_strom.shmem_size")));
+		return NULL;
+	}
+
+	devprop = (DeviceProperty *)block->data;
+
+	/* Copy the given template to shared memory */
+	memcpy(devprop, templ, sizeof(DeviceProperty));
+	for (i=0; i < lengthof(string_fields); i++)
+	{
+		char  **src = (char **)((char *)templ + string_fields[i]);
+		char  **dst = (char **)((char *)devprop + string_fields[i]);
+
+		if (!*src)
+			*dst = NULL;
+		else
+		{
+			*dst = devprop->data + offset;
+			strcpy(*dst, *src);
+			offset += strlen(*src) + 1;
+		}
+	}
+	Assert(offsetof(DeviceProperty, data) + offset <= length);
+
+	/* Chain it on the global list */
+	rc = pthread_rwlock_wrlock(&pgstrom_shmem_head->dev_lock);
+	if (rc != 0)
+	{
+		pgstrom_shmem_free(block);
+		if (abort_on_error)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("could not acquire device property lock: %s",
+							strerror(rc))));
+		return NULL;
+	}
+	dlist_push_tail(&pgstrom_shmem_head->dev_head, &devprop->chain);
+	pthread_rwlock_unlock(&pgstrom_shmem_head->dev_lock);
+
+	return devprop;
+}
+
+/*
+ * pgstrom_device_property_free
+ *
+ * It release the supplied DeviceProperty
+ */
+void
+pgstrom_device_property_free(DeviceProperty *devprop)
+{
+	ShmemBlock *block = container_of(ShmemBlock, data, devprop);
+	int			rc;
+
+	rc = pthread_rwlock_wrlock(&pgstrom_shmem_head->dev_lock);
+	if (rc != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not acquire device property lock: %s",
+						strerror(rc))));
+	dlist_delete(&devprop->chain);
+	pthread_rwlock_unlock(&pgstrom_shmem_head->dev_lock);
+
+	pgstrom_shmem_free(block);
+}
+
+/*
+ * pgstrom_device_property_(un)lock and pgstrom_device_property_next
+ *
+ * Iterator of DeviceProperty on the shared memory segment.
+ * Caller of these routine has to follow the manner below.
+ * 
+ * pgstrom_device_property_lock(false)
+ *   PG_TRY();
+ *   {
+ *       DeviceProperty  *devprop;
+ *
+ *       for (devprop = pgstrom_device_property_next(NULL);
+ *            devprop != NULL;
+ *            devprop = pgstrom_device_property_next(devprop))
+ *       {
+ *          ... do something to reference device properties ...
+ *       }
+ *   }
+ *   PG_CATCH();
+ *   {
+ *       pgstrom_device_property_unlock();
+ *       PG_RE_THROW();
+ *   }
+ *   PG_END_TRY();
+ *   pgstrom_device_property_unlock();
+ *
+ * Be careful that device-property-lock has to be unlocked on exceptions,
+ * and no to hold the lock too long.
+ */
+void
+pgstrom_device_property_lock(bool write_lock)
+{
+	int		rc;
+
+	if (write_lock)
+		rc = pthread_rwlock_wrlock(&pgstrom_shmem_head->dev_lock);
+	else
+		rc = pthread_rwlock_rdlock(&pgstrom_shmem_head->dev_lock);
+
+	if (rc != 0)
+		ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("could not acquire device property lock: %s",
+						strerror(rc))));
+}
+
+void
+pgstrom_device_property_unlock(void)
+{
+	pthread_rwlock_unlock(&pgstrom_shmem_head->dev_lock);
+}
+
+DeviceProperty *
+pgstrom_device_property_next(DeviceProperty *devprop)
+{
+	dlist_node	   *dnode;
+
+	if (!devprop)
+	{
+		if (dlist_is_empty(&pgstrom_shmem_head->dev_head))
+			return NULL;
+		dnode = dlist_head_node(&pgstrom_shmem_head->dev_head);
+	}
+	else
+	{
+		if (!dlist_has_next(&pgstrom_shmem_head->dev_head,
+							&devprop->chain))
+			return NULL;
+		dnode = dlist_next_node(&pgstrom_shmem_head->dev_head,
+								&devprop->chain);
+	}
+	return dlist_container(DeviceProperty, chain, dnode);
+}
+
+/*
+ * pgstrom_opencl_devices
+ *
+ * It dumps properties of all the installed OpenCL devices.
+ * Please note that this function performs in the process context of
+ * the backend process, so it is not available to rely on all the private
+ * data structure in open_serv.c. It just dumps data on shared memory segment
+ */
+static Datum
+fp_config_string(cl_device_fp_config fpconf)
+{
+	char	msgbuf[256];
+	size_t	offset = 0;
+
+	msgbuf[0] = '\0';
+	if (fpconf & CL_FP_DENORM)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sDenorm", offset > 0 ? ", " : "");
+	if (fpconf & CL_FP_INF_NAN)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sINF/NaN", offset > 0 ? ", " : "");
+	if (fpconf & CL_FP_ROUND_TO_NEAREST)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sR/nearest", offset > 0 ? ", " : "");
+	if (fpconf & CL_FP_ROUND_TO_ZERO)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sR/zero", offset > 0 ? ", " : "");
+	if (fpconf & CL_FP_ROUND_TO_INF)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sR/INF", offset > 0 ? ", " : "");
+	if (fpconf & CL_FP_FMA)
+		offset += snprintf(msgbuf + offset, sizeof(msgbuf) - offset,
+						   "%sFMA", offset > 0 ? ", " : "");
+
+	return CStringGetTextDatum(msgbuf);
+}
+
+Datum
+pgstrom_opencl_devices(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	dlist_head		   *device_list;
+	DeviceProperty	   *devprop;
+	int					index;
+	int					field;
+	HeapTuple			tuple;
+	Datum				values[3];
+	bool				isnull[3];
+	const char		   *attname;
+	char				msgbuf[512];
+	int					msgoff;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		struct timespec	abstime;
+        struct timeval	tv;
+        int				rc;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(3, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "index",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "attribute",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "value",
+						   TEXTOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		device_list = palloc(sizeof(dlist_head));
+		dlist_init(device_list);
+
+		gettimeofday(&tv, NULL);
+		abstime.tv_sec = tv.tv_sec + 10;
+		abstime.tv_nsec = tv.tv_usec * 1000;
+
+		rc = pthread_rwlock_timedrdlock(&pgstrom_shmem_head->dev_lock,
+										&abstime);
+		if (rc != 0)
+		{
+			Assert(rc == ETIMEDOUT);
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Bug? could not acquire lock on opencl devices")));
+		}
+		PG_TRY();
+		{
+			dlist_iter		iter;
+
+			dlist_foreach(iter, &pgstrom_shmem_head->dev_head)
+			{
+				DeviceProperty *orig = dlist_container(DeviceProperty,
+													   chain,
+													   iter.cur);
+
+				devprop = palloc0(sizeof(DeviceProperty));
+				memcpy(devprop, orig, sizeof(DeviceProperty));
+				if (orig->pf_profile)
+					devprop->pf_profile = pstrdup(orig->pf_profile);
+				if (orig->pf_vendor)
+					devprop->pf_vendor = pstrdup(orig->pf_vendor);
+				if (orig->pf_name)
+					devprop->pf_name = pstrdup(orig->pf_name);
+				if (orig->pf_version)
+					devprop->pf_version = pstrdup(orig->pf_version);
+				if (orig->pf_extensions)
+					devprop->pf_extensions = pstrdup(orig->pf_extensions);
+				if (orig->dev_profile)
+					devprop->dev_profile = pstrdup(orig->dev_profile);
+				if (orig->dev_vendor)
+					devprop->dev_vendor = pstrdup(orig->dev_vendor);
+				if (orig->dev_name)
+					devprop->dev_name = pstrdup(orig->dev_name);
+				if (orig->dev_version)
+					devprop->dev_version = pstrdup(orig->dev_version);
+				if (orig->dev_driver)
+					devprop->dev_driver = pstrdup(orig->dev_driver);
+				if (orig->dev_opencl_c_version)
+					devprop->dev_opencl_c_version
+						= pstrdup(orig->dev_opencl_c_version);
+				if (orig->dev_extensions)
+					devprop->dev_extensions = pstrdup(orig->dev_extensions);
+
+				dlist_push_tail(device_list, &devprop->chain);
+			}
+		}
+		PG_CATCH();
+		{
+			pthread_rwlock_unlock(&pgstrom_shmem_head->dev_lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		pthread_rwlock_unlock(&pgstrom_shmem_head->dev_lock);
+		MemoryContextSwitchTo(oldcxt);
+
+		fncxt->user_fctx = device_list;
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	device_list = (dlist_head *) fncxt->user_fctx;
+	if (dlist_is_empty(device_list))
+		SRF_RETURN_DONE(fncxt);
+
+	devprop = dlist_container(DeviceProperty, chain,
+							  dlist_head_node(device_list));
+
+	index = fncxt->call_cntr / 50;
+	field = fncxt->call_cntr % 50;
+
+	memset(values, 0, sizeof(values));
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = Int32GetDatum(index);
+	switch (field)
+	{
+		case 0:
+			attname = "local device";
+			values[2] = CStringGetTextDatum(devprop->is_local ? "yes" : "no");
+			break;
+		case 1:
+			attname = "platform profile";
+			values[2] = CStringGetTextDatum(devprop->pf_profile);
+			break;
+		case 2:
+			attname = "platform vendor";
+			values[2] = CStringGetTextDatum(devprop->pf_vendor);
+			break;
+		case 3:
+			attname = "platform name";
+			values[2] = CStringGetTextDatum(devprop->pf_name);
+			break;
+		case 4:
+			attname = "platform version";
+			values[2] = CStringGetTextDatum(devprop->pf_version);
+			break;
+		case 5:
+			attname = "platform extensions";
+			values[2] = CStringGetTextDatum(devprop->pf_extensions);
+			break;
+		case 6:
+			attname = "device type";
+			if (devprop->dev_type == CL_DEVICE_TYPE_CPU)
+				values[2] = CStringGetTextDatum("CPU");
+			else if (devprop->dev_type == CL_DEVICE_TYPE_GPU)
+				values[2] = CStringGetTextDatum("GPU");
+			else if (devprop->dev_type == CL_DEVICE_TYPE_ACCELERATOR)
+				values[2] = CStringGetTextDatum("Accelerator");
+			else if (devprop->dev_type == CL_DEVICE_TYPE_CUSTOM)
+				values[2] = CStringGetTextDatum("Custom");
+			else
+				isnull[2] = true;
+			break;
+		case 7:
+			attname = "device profile";
+			values[2] = CStringGetTextDatum(devprop->dev_profile);
+			break;
+		case 8:
+			attname = "device vendor";
+			values[2] = CStringGetTextDatum(devprop->dev_vendor);
+			break;
+		case 9:
+			attname = "device vendor id";
+			snprintf(msgbuf, sizeof(msgbuf),
+					 "0x%08x", devprop->dev_vendor_id);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 10:
+			attname = "device name";
+			values[2] = CStringGetTextDatum(devprop->dev_name);
+			break;
+		case 11:
+			attname = "device version";
+			values[2] = CStringGetTextDatum(devprop->dev_version);
+			break;
+		case 12:
+			attname = "device driver";
+			values[2] = CStringGetTextDatum(devprop->dev_driver);
+			break;
+		case 13:
+			attname = "device OpenCL C version";
+			values[2] = CStringGetTextDatum(devprop->dev_opencl_c_version);
+			break;
+		case 14:
+			attname = "device extensions";
+			values[2] = CStringGetTextDatum(devprop->dev_extensions);
+			break;
+		case 15:
+			attname = "device address bits";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_address_bits);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 16:
+			attname = "device available";
+			if (devprop->dev_available)
+				values[2] = CStringGetTextDatum("yes");
+            else
+                values[2] = CStringGetTextDatum("no");
+			break;
+		case 17:
+			attname = "device compiler available";
+			if (devprop->dev_compiler_available)
+				values[2] = CStringGetTextDatum("yes");
+			else
+				values[2] = CStringGetTextDatum("no");
+			break;
+		case 18:
+			attname = "device double FP config";
+			values[2] = fp_config_string(devprop->dev_double_fp_config);
+			break;
+		case 19:
+			attname = "device endian";
+			if (devprop->dev_endian_little)
+				values[2] = CStringGetTextDatum("little");
+			else
+				values[2] = CStringGetTextDatum("big");
+			break;
+		case 20:
+			attname = "device global memory cache size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_global_mem_cache_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 21:
+			attname = "device global memory cache type";
+			if (devprop->dev_global_mem_cache_type == CL_NONE)
+				values[2] = CStringGetTextDatum("none");
+			else if (devprop->dev_global_mem_cache_type == CL_READ_ONLY_CACHE)
+				values[2] = CStringGetTextDatum("read-only");
+			else if (devprop->dev_global_mem_cache_type == CL_READ_WRITE_CACHE)
+				values[2] = CStringGetTextDatum("read-write");
+			else
+				isnull[2] = true;
+			break;
+		case 22:
+			attname = "device global memory cacheline size";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_global_mem_cacheline_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 23:
+			attname = "device global memory size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_global_mem_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 24:
+			attname = "device host unified memory";
+			if (devprop->dev_host_unified_memory)
+				values[2] = CStringGetTextDatum("yes");
+			else
+				values[2] = CStringGetTextDatum("no");
+			break;
+		case 25:
+			attname = "device local memory size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_local_mem_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 26:
+			attname = "device local memory type";
+			if (devprop->dev_local_mem_type == CL_LOCAL)
+				values[2] = CStringGetTextDatum("SRAM");
+			else if (devprop->dev_local_mem_type == CL_GLOBAL)
+				values[2] = CStringGetTextDatum("DRAM");
+			else if (devprop->dev_local_mem_type == CL_NONE)
+				values[2] = CStringGetTextDatum("none");
+			else
+				isnull[2] = true;
+			break;
+		case 27:
+			attname = "device max clock frequency";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_max_clock_frequency);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 28:
+			attname = "device max compute units";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_max_compute_units);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 29:
+			attname = "device max constant arguments";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_max_constant_args);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 30:
+			attname = "device max constant buffer size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_max_constant_buffer_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 31:
+			attname = "device max memory allocation size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_max_mem_alloc_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 32:
+			attname = "device max parameter size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_max_parameter_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 33:
+			attname = "device max work group size";
+			snprintf(msgbuf, sizeof(msgbuf), "%lu",
+					 devprop->dev_max_work_group_size);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 34:
+			attname = "device max work item size";
+			snprintf(msgbuf, sizeof(msgbuf), "{%lu, %lu, %lu}",
+					 devprop->dev_max_work_item_sizes[0],
+					 devprop->dev_max_work_item_sizes[1],
+					 devprop->dev_max_work_item_sizes[2]);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 35:
+			attname = "device memory base address alignment";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_mem_base_addr_align);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 36:
+			attname = "device native vector width (char)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_char);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 37:
+			attname = "device native vector width (short)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_short);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 38:
+			attname = "device native vector width (int)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_int);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 39:
+			attname = "device native vector width (long)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_long);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 40:
+			attname = "device native vector width (float)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_float);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 41:
+			attname = "device native vector width (double)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_native_vector_width_double);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 42:
+			attname = "device preferred vector width (char)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_char);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 43:
+			attname = "device preferred vector width (short)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_short);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 44:
+			attname = "device preferred vector width (int)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_int);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 45:
+			attname = "device preferred vector width (long)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_long);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 46:
+			attname = "device preferred vector width (float)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_float);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 47:
+			attname = "device preferred vector width (double)";
+			snprintf(msgbuf, sizeof(msgbuf), "%u",
+					 devprop->dev_preferred_vector_width_double);
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 48:
+			attname = "device queue properties";
+			msgoff = 0;
+			if (devprop->dev_queue_properties &
+				CL_QUEUE_OUT_OF_ORDER_EXEC_MODE_ENABLE)
+				msgoff += snprintf(msgbuf + msgoff, sizeof(msgbuf) - msgoff,
+								   "%sout of order execution",
+								   msgoff > 0 ? ", " : "");
+			if (devprop->dev_queue_properties & CL_QUEUE_PROFILING_ENABLE)
+				msgoff += snprintf(msgbuf + msgoff, sizeof(msgbuf) - msgoff,
+								   "%sprofiling",
+								   msgoff > 0 ? ", " : "");
+			values[2] = CStringGetTextDatum(msgbuf);
+			break;
+		case 49:
+			attname = "device single FP config";
+			values[2] = fp_config_string(devprop->dev_single_fp_config);
+
+			/* because this attribute is last, remove current device */
+			dlist_delete(&devprop->chain);
+			break;
+		default:
+			elog(ERROR, "Bug? DeviceProperty has no %dth field", field);
+			attname = NULL;		/* be compiler quiet */
+			break;
+	}
+	values[1] = CStringGetTextDatum(attname);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_opencl_devices);
+
+/*
  * pgstrom_shmem_startup
  *
  * A callback routine during initialization of shared memory segment.
@@ -886,7 +1544,7 @@ pgstrom_shmem_dump(PG_FUNCTION_ARGS)
 				ditem->end = PointerGetDatum((char *)block + block->size);
 				ditem->pid = block->pid;
 				marker = SHMEM_BLOCK_OVERRUN_MARKER(block);
-				ditem->overrun = (marker == SHMEM_BLOCK_OVERRUN_MARK);
+				ditem->overrun = (marker != SHMEM_BLOCK_OVERRUN_MARK);
 
 				dlist_push_tail(dump_list, &ditem->chain);
 			}
@@ -931,7 +1589,7 @@ pgstrom_shmem_dump(PG_FUNCTION_ARGS)
 			break;
 		case SHMEM_BLOCK_FREE:
 			values[0] = CStringGetTextDatum("free block");
-			isnull[4] = true;
+			isnull[4] = isnull[5] = true;
 			break;
 		case SHMEM_BLOCK_STROM_QUEUE:
 			values[0] = CStringGetTextDatum("strom queue");

@@ -19,6 +19,8 @@
 #include "utils/resowner.h"
 #include <limits.h>
 #include <pthread.h>
+#include <CL/cl.h>
+#include <CL/cl_ext.h>
 
 /* debug messages */
 #ifdef PGSTROM_PRINT_DEBUG
@@ -184,57 +186,62 @@ typedef struct {
 } VarlenaBuffer;
 
 typedef struct {
-	uint32		length;		/* for varlena header */
-	dlist_node	chain;
+	dlist_node		chain;
+	bool			is_local;
 	/* platform information */
-	char	   *pf_vendor;
-	char	   *pf_name;
-	char	   *pf_version;
+	char		   *pf_profile;
+	char		   *pf_vendor;
+	char		   *pf_name;
+	char		   *pf_version;
+	char		   *pf_extensions;
 	/* device information */
-	uint32		dev_type;
-	char	   *dev_vendor;
-	uint32		dev_vendor_id;
-	char	   *dev_name;
-	char	   *dev_version;
-	char	   *dev_driver;
-	char	   *dev_opencl_c_version;
-	uint32		dev_address_bits;
-	uint32		dev_double_fp_config;
-	bool		dev_endian_little;
-	char	   *dev_extensions;
-	uint64		dev_global_mem_cache_size;
-	uint32		dev_global_mem_cache_type;
-	uint32		dev_global_mem_cacheline_size;
-	uint64		dev_global_mem_size;
-	bool		dev_host_unified_memory;
-	uint64		dev_local_mem_size;
-	uint32		dev_local_mem_type;
-	uint32		dev_max_clock_frequency;
-	uint32		dev_max_compute_units;
-	uint32		dev_max_constant_args;
-	uint64		dev_max_constant_buffer_size;
-	uint64		dev_max_mem_alloc_size;
-	size_t		dev_max_parameter_size;
-	size_t		dev_max_work_group_size;
-	size_t		dev_max_work_item_sizes[3];
-	uint32		dev_mem_base_addr_align;
-	uint32		dev_min_data_type_align_size;
-	uint32		dev_native_vector_width_char;
-	uint32		dev_native_vector_width_short;
-	uint32		dev_native_vector_width_int;
-	uint32		dev_native_vector_width_long;
-	uint32		dev_native_vector_width_float;
-	uint32		dev_native_vector_width_double;
-	uint32		dev_preferred_vector_width_char;
-	uint32		dev_preferred_vector_width_short;
-	uint32		dev_preferred_vector_width_int;
-	uint32		dev_preferred_vector_width_long;
-	uint32		dev_preferred_vector_width_float;
-	uint32		dev_preferred_vector_width_double;
-	size_t		dev_profiling_timer_resolution;
-	uint32		dev_queue_properties;
-	uint32		dev_single_fp_config;
-	char		data[0];
+	cl_device_type	dev_type;
+	char		   *dev_profile;
+	char		   *dev_vendor;
+	cl_uint			dev_vendor_id;
+	char		   *dev_name;
+	char		   *dev_version;
+	char		   *dev_driver;
+	char		   *dev_opencl_c_version;
+	char		   *dev_extensions;
+	cl_uint			dev_address_bits;
+	cl_bool			dev_available;
+	cl_bool			dev_compiler_available;
+	cl_device_fp_config dev_double_fp_config;
+	cl_bool			dev_endian_little;
+	cl_ulong		dev_global_mem_cache_size;
+	cl_device_mem_cache_type dev_global_mem_cache_type;
+	cl_uint			dev_global_mem_cacheline_size;
+	cl_ulong		dev_global_mem_size;
+	cl_bool			dev_host_unified_memory;
+	cl_ulong		dev_local_mem_size;
+	cl_device_local_mem_type dev_local_mem_type;
+	cl_uint			dev_max_clock_frequency;
+	cl_uint			dev_max_compute_units;
+	cl_uint			dev_max_constant_args;
+	cl_ulong		dev_max_constant_buffer_size;
+	cl_ulong		dev_max_mem_alloc_size;
+	size_t			dev_max_parameter_size;
+	size_t			dev_max_work_group_size;
+	cl_uint			dev_max_work_item_dimensions;
+	size_t			dev_max_work_item_sizes[3];
+	cl_uint			dev_mem_base_addr_align;
+	cl_uint			dev_native_vector_width_char;
+	cl_uint			dev_native_vector_width_short;
+	cl_uint			dev_native_vector_width_int;
+	cl_uint			dev_native_vector_width_long;
+	cl_uint			dev_native_vector_width_float;
+	cl_uint			dev_native_vector_width_double;
+	cl_uint			dev_preferred_vector_width_char;
+	cl_uint			dev_preferred_vector_width_short;
+	cl_uint			dev_preferred_vector_width_int;
+	cl_uint			dev_preferred_vector_width_long;
+	cl_uint			dev_preferred_vector_width_float;
+	cl_uint			dev_preferred_vector_width_double;
+	size_t			dev_profiling_timer_resolution;
+	cl_command_queue_properties dev_queue_properties;
+	cl_device_fp_config dev_single_fp_config;
+	char			data[0];
 } DeviceProperty;
 
 /* opencl_serv.c */
@@ -275,6 +282,14 @@ extern void pgstrom_chunk_buffer_free(ChunkBuffer *chunk);
 extern VarlenaBuffer *pgstrom_varlena_buffer_alloc(Size total_length,
 												   bool abort_on_error);
 extern void pgstrom_varlena_buffer_free(VarlenaBuffer *vlbuf);
+extern DeviceProperty *pgstrom_device_property_alloc(DeviceProperty *templ,
+													 bool abort_on_error);
+extern void pgstrom_device_property_free(DeviceProperty *devprop);
+extern void pgstrom_device_property_lock(bool write_lock);
+extern void pgstrom_device_property_unlock(void);
+extern DeviceProperty *pgstrom_device_property_next(DeviceProperty *devprop);
+extern Datum pgstrom_opencl_devices(PG_FUNCTION_ARGS);
+
 extern void pgstrom_shmem_init(void);
 extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
