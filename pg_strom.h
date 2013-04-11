@@ -294,6 +294,9 @@ extern void pgstrom_shmem_init(void);
 extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
 
+/* codegen.c */
+extern void pgstrom_coder_init(void);
+
 /* utilcmds.c */
 extern Relation pgstrom_open_shadow_rmap(Relation frel, LOCKMODE lockmode);
 extern Relation pgstrom_open_shadow_cstore(Relation frel, LOCKMODE lockmode);
