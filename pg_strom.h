@@ -244,6 +244,54 @@ typedef struct {
 	char			data[0];
 } DeviceProperty;
 
+/*
+ * clTypeInfo - cache for properties of OpenCL data-type
+ */
+typedef struct clTypeInfo {
+	dlist_node	chain;
+	uint32		hash;
+	/* oid of SQL type */
+	Oid			type_oid;
+	/* name of SQL type */
+	char	   *type_name;
+	/* name of opencl type */
+	char	   *type_ident;
+	/* definition of opencl type */
+	char	   *type_define;
+	/* function name to convert this type */
+	char	   *type_conv;
+	/* misc properties of this type */
+	int16		type_length;
+	bool		type_is_native;
+	bool		type_is_varlena;
+} clTypeInfo;
+
+/*
+ * clFuncInfo - cache for properties of OpenCL functions
+ */
+typedef struct {
+	dlist_node	chain;
+	uint32		hash;
+	/* namespace of SQL function, or InvalidOid if device only */
+	Oid			func_namespace;
+	/* name of SQL function */
+	char	   *func_name;
+	/* name of opencl function */
+	char	   *func_ident;
+	/* definition of opencl function */
+	char	   *func_define;
+	/* number of processors this function requires per row */
+	Expr	   *func_nprocs;
+	/* size of required working memory, if needed */
+	Expr	   *func_memsz;
+	/* function result type */
+	clTypeInfo *func_rettype;
+	/* function arguments type */
+	int			func_nargs;
+	Oid		   *func_argtypes_oid;
+	clTypeInfo *func_argtypes[0];
+} clFuncInfo;
+
 /* opencl_serv.c */
 extern void pgstrom_opencl_server_init(void);
 
@@ -295,7 +343,14 @@ extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
 
 /* codegen.c */
-extern void pgstrom_coder_init(void);
+extern clTypeInfo *pgstrom_cltype_lookup(Oid type_oid);
+extern clFuncInfo *pgstrom_clfunc_lookup(Oid func_oid);
+extern text *pgstrom_codegen_qual(PlannerInfo *root,
+								  RelOptInfo *baserel,
+								  List *kernel_quals,
+								  List **kernel_params,	/* out */
+								  List **kernel_cols);	/* out */
+extern void pgstrom_codegen_init(void);
 
 /* utilcmds.c */
 extern Relation pgstrom_open_shadow_rmap(Relation frel, LOCKMODE lockmode);
