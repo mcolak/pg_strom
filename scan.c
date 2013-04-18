@@ -443,7 +443,8 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
 	Relation		frel = fss->ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
-	bytea		   *kernel_source = NULL;
+	text		   *kernel_source = NULL;
+	bytea		   *kernel_md5 = NULL;
 	text		   *kernel_quals = NULL;
 	List		   *kernel_params = NIL;
 	List		   *kernel_cols = NIL;

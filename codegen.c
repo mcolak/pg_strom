@@ -1276,6 +1276,9 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 	{
 		Node   *expr = lfirst(cell);
 
+		if (exprType(expr) != BOOLOID)
+			elog(ERROR, "Bug? BoolExpr takes non-bool argument");
+
 		if (cell != list_head(args))
 			appendStringInfo(buf, ", ");
 		codegen_kernel_expr(buf, context, expr);
@@ -1336,7 +1339,6 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 			elog(ERROR, "clTypeInfo lookup failed for type: %s",
 				 format_type_be(var->vartype));
 
-		/* TODO: to be labeled as col_<attname> */
 		context->type_list = list_append_unique(context->type_list, tinfo);
 		appendStringInfo(buf, "pg_%s_vref(%u,rowidx,kargs,kvlbuf)",
 						 tinfo->type_name,
@@ -1368,7 +1370,7 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 text *
 pgstrom_codegen_qual(PlannerInfo *root,
 					 RelOptInfo *baserel,
-					 List *kernel_quals,
+					 Node *kernel_expr,
 					 List **p_kernel_params,	/* out */
 					 List **p_kernel_cols)	/* out */
 {
@@ -1383,11 +1385,9 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	StringInfoData	kern_qual;
 	StringInfoData	kern_body;
 
-	Assert(list_length(kernel_quals) > 0);
-
+	Assert(kernel_expr != NULL);
 	initStringInfo(&kern_qual);
 	initStringInfo(&kern_body);
-
 	kern_body.len = VARHDRSZ;
 
 	/*
@@ -1431,12 +1431,8 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	/*
 	 * Generate a kernel expression from an expression tree
 	 */
-	if (list_length(kernel_quals) == 1)
-		codegen_kernel_expr(&kern_qual, &context, linitial(kernel_quals));
-	else
-		codegen_kernel_expr(&kern_qual, &context,
-							(Node *) makeBoolExpr(AND_EXPR,
-												  kernel_quals, -1));
+	codegen_kernel_expr(&kern_qual, &context, kernel_expr);
+
 	/* add type definition */
 	foreach (cell, context.type_list)
 	{

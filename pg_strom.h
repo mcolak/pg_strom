@@ -347,7 +347,7 @@ extern clTypeInfo *pgstrom_cltype_lookup(Oid type_oid);
 extern clFuncInfo *pgstrom_clfunc_lookup(Oid func_oid);
 extern text *pgstrom_codegen_qual(PlannerInfo *root,
 								  RelOptInfo *baserel,
-								  List *kernel_quals,
+								  Node *kernel_expr,
 								  List **kernel_params,	/* out */
 								  List **kernel_cols);	/* out */
 extern void pgstrom_codegen_init(void);
