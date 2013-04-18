@@ -425,6 +425,7 @@ flush_vstate_to_column_store(VacuumState *vstate)
 	StringInfoData buf;
 
 	Assert(vstate->cs_nitems == PGSTROM_CHUNK_SIZE);
+	Assert(vstate->cs_nitems % PGSTROM_ALIGN_SIZE == 0);
 	initStringInfo(&buf);
 
 	/*
@@ -435,7 +436,7 @@ flush_vstate_to_column_store(VacuumState *vstate)
 	length = VARHDRSZ + sizeof(bool) * new_nitems;
 	uncompress = palloc(length);
 	SET_VARSIZE(uncompress, length);
-	memset(VARDATA(uncompress), -1, sizeof(bool) * new_nitems);
+	memset(VARDATA(uncompress), 0, sizeof(bool) * new_nitems);
 	new_rowmap = toast_compress_bytea(uncompress);
 	if (!new_rowmap)
 		new_rowmap = uncompress;

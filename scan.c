@@ -20,6 +20,7 @@
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "storage/bufmgr.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -90,96 +91,78 @@ static int	pgstrom_max_async_chunks;
  */
 static KernelParams *
 extract_kernel_params(EState *estate,
-					  bytea *kernel_source, List *kernel_params)
+					  text *kernel_source,
+					  bytea *kernel_md5,
+					  List *kernel_params)
 {
 	StringInfoData	str;
+	kern_params_t  *kparams;
+	cl_int			p_index;
+	size_t			length;
 	KernelParams   *result;
-	bytea		   *params;
-	uint32			nparams;
-	int				needed;
-	int				base_offset;
-	int				pindex = 0;
-	Datum			zero = 0;
 	ListCell	   *cell;
 
 	if (!kernel_source)
 		return NULL;
 
+	Assert(kernel_md5 != NULL);
+
+	/*
+	 * Construct kernel parameters
+	 */
 	initStringInfo(&str);
-	str.len += sizeof(bytea *);
+	kparams = (kern_params_t *)str.data;
+	kparams->p_nums = list_length(kernel_params);
+	length = offsetof(kern_params_t, p_offset[kparams->p_nums]);
+	enlargeStringInfo(&str, length);
+	str.len = length;
 
-	/*
-	 * Planner should already construct kernek_flags and kernel_digest,
-	 * not only kernel_source.
-	 */
-	appendBinaryStringInfo(&str,
-						   VARDATA(kernel_source),
-						   VARSIZE_ANY_EXHDR(kernel_source));
-	if (str.len != MAXALIGN(str.len))
-		appendBinaryStringInfo(&str, (char *)&zero,
-							   MAXALIGN(str.len) - str.len);
-
-	*((bytea **)str.data) = params = (bytea *)(str.data + str.len);
-	base_offset = str.len;
-
-	/* region for params_num, params_isnull and params_values */
-	nparams = list_length(kernel_params);
-	needed = MAXALIGN(VARHDRSZ +
-					  sizeof(uint32) +
-					  MAXALIGN(sizeof(bool) * nparams) +
-					  MAXALIGN(sizeof(Datum) * nparams));
-	enlargeStringInfo(&str, needed);
-	str.len += needed;
-
-	/* number of parameters */
-	*((uint32 *)VARDATA(params)) = nparams;
-
-	/*
-	 * params->data can be adjusted later if enlargeStringInfo()
-	 * re-allocates the buffer of StringInfo, so we need to use macro
-	 * to ensure both of params_isnull and params_values are always
-	 * valid pointers.
-	 */
-#define params_isnull ((bool *)(VARDATA(params) + sizeof(uint32)))
-#define params_values ((Datum *)(VARDATA(params) + sizeof(uint32) + \
-								 MAXALIGN(sizeof(bool) * nparams)))
-	memset(params_isnull, -1, sizeof(bool) * nparams);
-	memset(params_values,  0, sizeof(Datum) * nparams);
-
+	p_index = 0;
 	foreach (cell, kernel_params)
 	{
-		if (IsA(lfirst(cell), Const))
+		Node   *node = lfirst(cell);
+
+		if (IsA(node, Const))
 		{
 			Const  *c = (Const *) lfirst(cell);
 
-			if (!c->constisnull)
+			if (c->constisnull)
+				kparams->p_offset[p_index] = 0;
+			else
 			{
-				if (c->constbyval)
-					params_values[pindex] = c->constvalue;
+				/* force alignment */
+				if (c->constlen > 0)
+					str.len = (str.len + c->constlen - 1) & ~(c->constlen - 1);
 				else
-				{
-					params_values[pindex] = str.len - base_offset;
-					if (c->constlen > 0)
-						appendBinaryStringInfo(&str,
-											   DatumGetPointer(c->constvalue),
-											   c->constlen);
-					else
-						appendBinaryStringInfo(&str,
-										(char *)DatumGetByteaP(c->constvalue),
-										VARSIZE_ANY(c->constvalue));
-				}
-				params_isnull[pindex] = false;
+					str.len = (str.len + VARHDRSZ - 1) & ~(VARHDRSZ - 1);
+				enlargeStringInfo(&str, 0);
+				kparams->p_offset[p_index] = str.len;
+
+				if (c->constbyval)
+					appendBinaryStringInfo(&str,
+										   (char *)&c->constvalue,
+										   c->constlen);
+				else if (c->constlen > 0)
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(c->constvalue),
+										   c->constlen);
+				else
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(c->constvalue),
+										   VARSIZE_ANY(c->constvalue));
 			}
 		}
-		else if (IsA(lfirst(cell), Param))
+		else if (IsA(node, Param))
 		{
 			Param  *p = (Param *) lfirst(cell);
 			ParamListInfo	 pinfo = estate->es_param_list_info;
-			ParamExternData *ped;
+			ParamExternData	*ped;
 
 			Assert(p->paramid < pinfo->numParams);
 			ped = &pinfo->params[p->paramid];
-			if (!ped->isnull)
+			if (ped->isnull)
+				kparams->p_offset[p_index] = 0;
+			else
 			{
 				int16	typlen;
 				bool	typbyval;
@@ -187,42 +170,51 @@ extract_kernel_params(EState *estate,
 				Assert(p->paramtype == ped->ptype);
 				get_typlenbyval(ped->ptype, &typlen, &typbyval);
 
-				if (typbyval)
-					params_values[pindex] = ped->value;
+				/* force alignment */
+				if (typlen > 0)
+					str.len = (str.len + typlen - 1) & ~(typlen - 1);
 				else
-				{
-					params_values[pindex] = str.len - base_offset;
-					if (typlen > 0)
-						appendBinaryStringInfo(&str,
-											   DatumGetPointer(ped->value),
-											   typlen);
-					else
-						appendBinaryStringInfo(&str,
-										(char *)DatumGetByteaP(ped->value),
-										VARSIZE_ANY(ped->value));
-				}
-				params_isnull[pindex] = false;
+					str.len = (str.len + VARHDRSZ - 1) & ~(VARHDRSZ - 1);
+				enlargeStringInfo(&str, 0);
+				kparams->p_offset[p_index] = str.len;
+
+				if (typbyval)
+					appendBinaryStringInfo(&str,
+										   (char *)&ped->value,
+										   typlen);
+				else if (typlen > 0)
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(ped->value),
+										   typlen);
+				else
+					appendBinaryStringInfo(&str,
+										   (char *)DatumGetByteaP(ped->value),
+										   VARSIZE_ANY(ped->value));
 			}
 		}
 		else
-			elog(ERROR, "unexpected node: %d", nodeTag(lfirst(cell)));
+			elog(ERROR, "unexpected node: %d", nodeTag(node));
 
-		/* adjust offset alignment */
-		needed = MAXALIGN(str.len) - str.len;
-		if (needed > 0)
-			appendBinaryStringInfo(&str, (char *)&zero, needed);
-		pindex++;
+		p_index++;
 	}
-	Assert(pindex == nparams);
-#undef param_isnull
-#undef param_values
-	SET_VARSIZE(params, str.len - base_offset);
+	Assert(kparams->p_nums == p_index);
 
 	/*
-	 * Copy it on KernelParams structure on the shared memory segment
+	 * copy them on KernelParams structure allocated on shared memory
+	 * segment.
 	 */
-	result = pgstrom_kernel_params_alloc(str.len, true);
-	memcpy(result, str.data, str.len);
+	result = pgstrom_kernel_params_alloc(sizeof(KernelParams) +
+										 VARSIZE(kernel_source) +
+										 str.len, true);
+	memcpy(result->kernel_digest, VARDATA(kernel_md5), MD5_SIZE);
+	memcpy(&result->kernel_source,
+		   VARDATA(kernel_source),
+		   VARSIZE(kernel_source));
+	result->kernel_params = (kern_params_t *)(((char *)result) +
+											  offsetof(KernelParams,
+													   kernel_source) +
+											  VARSIZE(kernel_source));
+	memcpy(result->kernel_params, kparams, str.len);
 
 	pfree(str.data);
 
@@ -471,11 +463,23 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	foreach (cell, fscan->fdw_private)
 	{
 		DefElem	   *defel = (DefElem *) lfirst(cell);
+		Datum		temp;
 
 		if (strcmp(defel->defname, "kernel_source") == 0)
-			kernel_source = DatumGetByteaP(((Const *)defel->arg)->constvalue);
+		{
+			temp = ((Const *)defel->arg)->constvalue;
+			kernel_source = DatumGetTextP(temp);
+		}
+		else if (strcmp(defel->defname, "kernel_md5") == 0)
+		{
+			temp = ((Const *)defel->arg)->constvalue;
+			kernel_md5 = DatumGetByteaP(temp);
+		}
 		else if (strcmp(defel->defname, "kernel_quals") == 0)
-			kernel_quals = DatumGetTextP(((Const *)defel->arg)->constvalue);
+		{
+			temp = ((Const *)defel->arg)->constvalue;
+			kernel_quals = DatumGetTextP(temp);
+		}
 		else if (strcmp(defel->defname, "kernel_params") == 0)
 			kernel_params = lappend(kernel_params, defel->arg);
 		else if (strcmp(defel->defname, "kernel_cols") == 0)
@@ -533,6 +537,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	sestate->recvq = pgstrom_queue_alloc(true);
 	sestate->kernel_params = extract_kernel_params(sestate->estate,
 												   kernel_source,
+												   kernel_md5,
 												   kernel_params);
 	dlist_init(&sestate->chunk_ready_list);
 	dlist_init(&sestate->chunk_free_list);
@@ -1025,7 +1030,7 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	MemoryContext oldcxt;
 	TupleDesc	tupdesc;
 	HeapTuple	tuple;
-	int			i, nitems;
+	int			i, nitems, nitems_ex;
 	bool	   *rs_isnull;
 	Datum	   *rs_values;
 	ListCell   *cell;
@@ -1063,9 +1068,12 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	}
 	if (nitems == 0)
 		return false;
+	/* expand nitems to the alignment size of PGSTROM_ALIGN_SIZE */
+	nitems_ex = (nitems + PGSTROM_ALIGN_SIZE - 1) & ~(PGSTROM_ALIGN_SIZE - 1);
+	Assert(nitems_ex <= PGSTROM_CHUNK_SIZE);
 
 	/* to avoid rowid == 0, using PGSTROM_CHUNK_SIZE instead */
-	refresh_chunk_buffer(sestate, chunk, PGSTROM_CHUNK_SIZE, nitems);
+	refresh_chunk_buffer(sestate, chunk, PGSTROM_CHUNK_SIZE, nitems_ex);
 
 	/*
 	 * organize the fetched tuples according to the manner
@@ -1075,10 +1083,11 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	rs_isnull = palloc(sizeof(bool) * tupdesc->natts);
 	rs_values = palloc(sizeof(Datum) * tupdesc->natts);
 
-	memset(chunk->cb_rowmap, -1, sizeof(bool) * nitems);
+	memset(chunk->cb_rowmap, 0, sizeof(bool) * nitems_ex);
 	if (sestate->kernel_cols == NIL)
 		return true;
 
+	Assert(nitems_ex <= PGSTROM_CHUNK_SIZE);
 	for (i=0; i < nitems; i++)
 	{
 		heap_deform_tuple(chunk->rs_cache[i], tupdesc,
@@ -1104,6 +1113,34 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 		}
 		if (sestate->varlena_cols != NIL)
 			pgstrom_load_varlena(sestate, chunk, i, rs_isnull, rs_values);
+	}
+
+	/*
+	 * Put some dummy data if original 'nitem' is not a multiple number
+	 * of PGSTROM_ALIGN_SIZE; to ensure vector load / store operation is
+	 * available around boundary.
+	 */
+	if (nitems_ex > nitems)
+	{
+		int		drift = nitems_ex - nitems;
+
+		memset(chunk->cb_rowmap + sizeof(bool) * nitems,
+			   -1, sizeof(bool) * drift);
+		foreach (cell, sestate->kernel_cols)
+		{
+			AttrNumber	j = lfirst_int(cell) - 1;
+			bool	   *cb_isnull = (bool *)chunk->cb_isnull[j];
+			char	   *cb_values = (char *)chunk->cb_values[j];
+			Form_pg_attribute attr = tupdesc->attrs[j];
+
+			memset(cb_isnull + nitems, -1, sizeof(bool) * drift);
+			if (attr->attbyval)
+				memset(cb_values + attr->attlen * nitems,
+					   0, attr->attlen * drift);
+			else
+				memset(cb_values + sizeof(int) * nitems,
+					   0, sizeof(int) * drift);
+		}
 	}
 	chunk->is_loaded = true;
 
@@ -1260,10 +1297,35 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 	 */
 	while (curr_index < chunk->nitems)
 	{
-		if (!chunk->cb_rowmap[curr_index])
+		int		rowmap = chunk->cb_rowmap[curr_index];
+
+		if (rowmap == STROMCL_ERRCODE_ROW_MASKED)
 		{
 			curr_index++;
 			continue;
+		}
+		else if (rowmap != STROMCL_ERRCODE_SUCCESS)
+		{
+			switch (rowmap)
+			{
+				case STROMCL_ERRCODE_DIV_BY_ZERO:
+					ereport(ERROR,
+							(errcode(ERRCODE_DIVISION_BY_ZERO),
+							 errmsg("division by zero")));
+					break;
+
+				case STROMCL_ERRCODE_OUT_OF_RANGE:
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 errmsg("value out of range")));
+					break;
+
+				default:	/* STROMCL_ERRCODE_INTERNAL */
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("opencl server internal error")));
+					break;
+			}
 		}
 
 		/*
@@ -1687,7 +1749,8 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 {
 	ForeignScan	   *fscan = (ForeignScan *)fss->ss.ps.plan;
 	TupleDesc		tupdesc = RelationGetDescr(fss->ss.ss_currentRelation);
-	bytea		   *kernel_source = NULL;
+	text		   *kernel_source = NULL;
+	text		   *kernel_md5 = NULL;
 	text		   *kernel_quals = NULL;
 	List		   *kernel_params = NIL;
 	List		   *kernel_cols = NIL;
@@ -1704,7 +1767,9 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 		DefElem	   *defel = (DefElem *) lfirst(cell);
 
 		if (strcmp(defel->defname, "kernel_source") == 0)
-			kernel_source = DatumGetByteaP(((Const *)defel->arg)->constvalue);
+			kernel_source = DatumGetTextP(((Const *)defel->arg)->constvalue);
+		else if (strcmp(defel->defname, "kernel_md5") == 0)
+			kernel_md5 = DatumGetByteaP(((Const *)defel->arg)->constvalue);
 		else if (strcmp(defel->defname, "kernel_quals") == 0)
 			kernel_quals = DatumGetTextP(((Const *)defel->arg)->constvalue);
 		else if (strcmp(defel->defname, "kernel_params") == 0)
@@ -1730,7 +1795,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 						 buf.len > 0 ? ", " : "",
 						 NameStr(attr->attname));
 	}
-	ExplainPropertyText("Host columns", buf.data, es);
+	ExplainPropertyText("host columns", buf.data, es);
 
 	/* Dump kernel columns */
 	resetStringInfo(&buf);
@@ -1747,17 +1812,55 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 						 buf.len > 0 ? ", " : "",
 						 NameStr(attr->attname));
 	}
-	ExplainPropertyText("Kernel columns", buf.data, es);
+	ExplainPropertyText("kernel columns", buf.data, es);
 
 	/* Dump qualifier of this scan */
 	if (!es->verbose)
 	{
 		if (kernel_quals)
-			ExplainPropertyText("Kernel quals", VARDATA(kernel_quals), es);
+		{
+			char   *qual_cstring = text_to_cstring(kernel_quals);
+			ExplainPropertyText("kernel quals", qual_cstring, es);
+		}
 	}
-	else
+	else if (kernel_source)
 	{
-		elog(ERROR, "not implemented now - kernel_source: %p", kernel_source);
+		static const char *hex = "0123456789abcdef";
+		char	strbuf[2 * MD5_SIZE + 1];
+		char   *source = text_to_cstring(kernel_source);
+		char   *head;
+		char   *pos;
+		int		lineno = 1;
+		int		c, i, j;
+
+		/* transform kernel_md5 to human readable form */
+		Assert(kernel_md5 != NULL);
+		head = VARDATA(kernel_md5);
+		for (i=0, j=0; i < MD5_SIZE; i++)
+		{
+			strbuf[j++] = hex[(head[i] >> 4) & 0x0f];
+			strbuf[j++] = hex[ head[i]       & 0x0f];
+		}
+		strbuf[j++] = '\0';
+
+		ExplainPropertyText("kernel md5", strbuf, es);
+
+		/* output kernel source per line */
+		head = pos = source;
+		while (true)
+		{
+			c = *pos++;
+
+			if (c == '\n' || c == '\0')
+			{
+				snprintf(strbuf, sizeof(strbuf), "% 4d", lineno++);
+				pos[-1] = '\0';
+				ExplainPropertyText(strbuf, head, es);
+				if (c == '\0')
+					break;
+				head = pos;
+			}
+		}
 	}
 }
 

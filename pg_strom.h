@@ -21,6 +21,7 @@
 #include <pthread.h>
 #include <CL/cl.h>
 #include <CL/cl_ext.h>
+#include "opencl_common.h"
 
 /* debug messages */
 #ifdef PGSTROM_PRINT_DEBUG
@@ -61,6 +62,18 @@ extern bool pgstrom_print_debug;
 /* index of shadow row-store(oid) */
 #define Inum_pg_strom_rs_oid		1
 
+/*
+ * NOTE: we assume *every* chunk has aligned number of items,
+ * even if nitems is less than PGSTROM_CHUNK_SIZE, to ensure
+ * vectore load / store operation is safe to access.
+ * 
+ * things to be considers:
+ * - Nvidia has idea of warp that runs 32 of concurrent thread in parallel,
+ *   thus multiple numbers of 32 is reasonable choice.
+ * - Intel Xeon Phi has 512bit SIMD ALU that can run 16 of concurrent single
+ *   floating-point operations, thus nitems must be multiple numbers of 16
+ *   to ensure vload / vstore working safety.
+ */
 #define PGSTROM_ALIGN_SIZE		32
 #define PGSTROM_CHUNK_SIZE								\
 	((MaximumBytesPerTuple(1)							\
@@ -100,21 +113,12 @@ typedef struct {
 	bool			is_shutdown;
 } StromQueue;
 
+#define MD5_SIZE	16	/* 128bits */
 typedef struct {
-	bytea		   *params;
+	kern_params_t  *kernel_params;
 	uint32			kernel_flags;
-	uint8			kernel_digest[16];	/* MD5 */
+	uint8			kernel_digest[MD5_SIZE];
 	text			kernel_source;
-	/*
-	 * uint32       va_header of kernel_source
-	 * char         va_data[...] of kernel_source
-	 *   :
-	 * uint32       va_header of params
-	 * uint32		params_num; 
-	 * bool			params_isnull[params_num];
-	 * Datum		params_values[params_num];
-	 * char         data[...]
-	 */
 } KernelParams;
 
 typedef struct {

@@ -245,7 +245,7 @@ row_delete_from_cstore(EState *estate, StromModifyState *smstate, int64 rowid)
 		Assert(index >= 0 && index < smstate->curr_nitems);
 		Assert(sizeof(bool) * index < VARSIZE_ANY_EXHDR(smstate->curr_rowmap));
 
-		((bool *)VARDATA(smstate->curr_rowmap))[index] = false;
+		VARDATA(smstate->curr_rowmap)[index] = STROMCL_ERRCODE_ROW_MASKED;
 	}
 }
 

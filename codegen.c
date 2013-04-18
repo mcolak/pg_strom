@@ -229,7 +229,8 @@ clfunc_cb_native_cast(clFuncInfo *finfo,
 	initStringInfo(&str);
 	appendStringInfo(
 		&str,
-		"static inline %s %s(__private char_v *rmap, %s arg)\n"
+		"static inline %s\n"
+		"%s(__private char_v *rmap, %s arg)\n"
 		"{\n"
 		"  %s result;\n"
 		"\n"
@@ -237,7 +238,7 @@ clfunc_cb_native_cast(clFuncInfo *finfo,
 		"  result.value = %s(arg.value);\n"
 		"\n"
 		"  return result;\n"
-		"}\n\n",
+		"}\n",
 		finfo->func_rettype->type_ident,
 		finfo->func_ident,
 		finfo->func_argtypes[0]->type_ident,
@@ -268,7 +269,8 @@ clfunc_cb_both_oper(clFuncInfo *finfo,
 	initStringInfo(&str);
 	appendStringInfo(
 		&str,
-		"static inline %s %s(__private char_v *rmap, %s arg1, %s arg2)\n"
+		"static inline %s\n"
+		"%s(__private char_v *rmap, %s arg1, %s arg2)\n"
 		"{\n"
 		"  %s result;\n"
 		"\n",
@@ -283,7 +285,7 @@ clfunc_cb_both_oper(clFuncInfo *finfo,
 		appendStringInfo(
 			&str,
 			"  result.isnull = (arg1.isnull | arg2.isnull);\n"
-			"  result.value = %s(arg1.value %s arg2.value);\n\n",
+			"  result.value = %s(arg1.value %s arg2.value);\n",
 			rettype == arg1type ? "" : rettype->type_conv,
 			func_data);
 	}
@@ -292,7 +294,7 @@ clfunc_cb_both_oper(clFuncInfo *finfo,
 		appendStringInfo(
 			&str,
 			"  result.isnull = (arg1.isnull | arg2.isnull);\n"
-			"  result.value = %s(arg1.value %s %s(arg2.value));\n\n",
+			"  result.value = %s(arg1.value %s %s(arg2.value));\n",
 			rettype == arg1type ? "" : rettype->type_conv,
 			func_data,
 			arg1type->type_conv);
@@ -302,7 +304,7 @@ clfunc_cb_both_oper(clFuncInfo *finfo,
 		appendStringInfo(
 			&str,
 			"  result.isnull = (arg1.isnull | arg2.isnull);\n"
-			"  result.value = %s(%s(arg1.value) %s arg2.value);\n\n",
+			"  result.value = %s(%s(arg1.value) %s arg2.value);\n",
 			rettype == arg2type ? "" : rettype->type_conv,
 			arg2type->type_conv,
 			func_data);
@@ -317,16 +319,16 @@ clfunc_cb_both_oper(clFuncInfo *finfo,
 	{
 		appendStringInfo(
 			&str,
-			"  *rmap |= (*rmap == (char)0)"
-			"        & pg_convert_char_v(arg2.value == %s(%s))"
-			"        & STROMCL_ERRCODE_DIV_BY_ZERO",
+			"  *rmap |= (*rmap == (char)0)\n"
+			"        & pg_convert_char_v(arg2.value == %s(%s))\n"
+			"        & STROMCL_ERRCODE_DIV_BY_ZERO;\n",
 			arg2type->type_conv,
 			strncmp(finfo->func_name, "float", 5) == 0 ? "0.0" : "0");
 	}
 	appendStringInfo(&str,
 					 "\n"
 					 "  return result;\n"
-					 "}\n\n");
+					 "}\n");
 
 	MemoryContextSwitchTo(oldcxt);
 
@@ -350,7 +352,8 @@ clfunc_cb_left_oper(clFuncInfo *finfo,
 	initStringInfo(&str);
 	appendStringInfo(
 		&str,
-		"static inline %s %s(__private char_v *rmap, %s arg1)\n"
+		"static inline %s\n"
+		"%s(__private char_v *rmap, %s arg1)\n"
 		"{\n"
 		"  %s result;\n"
 		"\n"
@@ -358,7 +361,7 @@ clfunc_cb_left_oper(clFuncInfo *finfo,
 		"  result.value = %s(%s(arg1.value));\n"
 		"\n"
 		"  return result;\n"
-		"}\n\n",
+		"}\n",
 		rettype->type_ident,
 		finfo->func_ident,
 		argtype->type_ident,
@@ -386,7 +389,8 @@ clfunc_cb_builtin_math(clFuncInfo *finfo,
 	/* use default func_ident, so construct its definition */
 	initStringInfo(&str);
 	appendStringInfo(&str,
-					 "static inline %s %s(__private char_v *rmap",
+					 "static inline %s\n"
+					 "%s(__private char_v *rmap",
 					 rettype->type_ident,
 					 finfo->func_ident);
 	for (i=0; i < finfo->func_nargs; i++)
@@ -431,6 +435,9 @@ clfunc_cb_builtin_math(clFuncInfo *finfo,
 		elog(ERROR, "unexpected catalog description '%s' for clFunInfo %s",
 			 func_data, finfo->func_ident);
 
+	appendStringInfo(&str,
+					 "  return result;\n"
+					 "}\n");
 	MemoryContextSwitchTo(oldcxt);
 
 	finfo->func_define = str.data;
@@ -454,7 +461,7 @@ clfunc_cb_bool_expr(clFuncInfo *finfo,
 	/* construct function definition */
 	initStringInfo(&str);
 	Assert(finfo->func_rettype->type_oid == BOOLOID);
-	appendStringInfo(&str, "static inline %s %s(",
+	appendStringInfo(&str, "static inline %s\n%s(",
 					 finfo->func_rettype->type_ident,
 					 finfo->func_ident);
 	for (i=0; i < finfo->func_nargs; i++)
@@ -494,7 +501,7 @@ clfunc_cb_bool_expr(clFuncInfo *finfo,
 	appendStringInfo(&str,
 					 "\n"
 					 "  return result;\n"
-					 "}\n\n");
+					 "}\n");
 	MemoryContextSwitchTo(oldcxt);
 
 	finfo->func_define = str.data;
@@ -1017,6 +1024,18 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 	finfo->func_nargs = func_argtypes->dim1;
 	finfo->func_argtypes_oid = (Oid *)(finfo->func_argtypes +
 									   func_argtypes->dim1);
+	finfo->func_rettype = pgstrom_cltype_lookup(func_rettype);
+	if (!finfo->func_rettype)
+		elog(ERROR, "failed to lookup clTypeInfo of %s",
+			 format_type_be(func_rettype));
+	for (k=0; k < func_argtypes->dim1; k++)
+	{
+		finfo->func_argtypes[k] =
+			pgstrom_cltype_lookup(func_argtypes->values[k]);
+		if (!finfo->func_argtypes[k])
+			elog(ERROR, "failed to lookup clTypeInfo of %s",
+				 format_type_be(func_argtypes->values[k]));
+	}
 	if (func_namespace != PG_CATALOG_NAMESPACE)
 		goto skip;
 
@@ -1031,20 +1050,6 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 			char			namebuf[NAMEDATALEN + 20]; 
 			const char	   *func_data;
 			MemoryContext	oldcxt;
-
-			finfo->func_rettype = pgstrom_cltype_lookup(func_rettype);
-			if (!finfo->func_rettype)
-				elog(ERROR, "failed to lookup clTypeInfo of %s",
-					 format_type_be(func_rettype));
-
-			for (k=0; k < func_argtypes->dim1; k++)
-			{
-				finfo->func_argtypes[k] =
-					pgstrom_cltype_lookup(func_argtypes->values[k]);
-				if (!finfo->func_argtypes[k])
-					elog(ERROR, "failed to lookup clTypeInfo of %s",
-						 format_type_be(func_argtypes->values[k]));
-			}
 
 			/*
 			 * Right now, we assume all the functions in catalog needs
@@ -1235,18 +1240,18 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 	{
 		case AND_EXPR:
 			snprintf(namebuf, sizeof(namebuf),
-					 "pg_and_expr%d", list_length(args));
+					 "pg_bool_and%d_expr", list_length(args));
 			func_cb_data = "&";
 			break;
 		case OR_EXPR:
 			snprintf(namebuf, sizeof(namebuf),
-					 "pg_or_expr%d", list_length(args));
+					 "pg_bool_or%d_expr", list_length(args));
 			func_cb_data = "|";
 			break;
 		case NOT_EXPR:
 			Assert(list_length(args) == 1);
 			snprintf(namebuf, sizeof(namebuf),
-					 "pg_not_expr%d", list_length(args));
+					 "pg_bool_not_expr");
 			func_cb_data = "~";
 			break;
 		default:
@@ -1376,7 +1381,7 @@ pgstrom_codegen_qual(PlannerInfo *root,
 {
 	codegen_context	context;
 	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
-	Bitmapset	   *varattnos;
+	Bitmapset	   *varattnos = NULL;
 	HeapTuple		tuple;
 	int				attnum;
 	int				attidx;
@@ -1386,6 +1391,9 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	StringInfoData	kern_body;
 
 	Assert(kernel_expr != NULL);
+	if (exprType(kernel_expr) != BOOLOID)
+		elog(ERROR, "Bug? kernel_expr has non-bool type");
+
 	initStringInfo(&kern_qual);
 	initStringInfo(&kern_body);
 	kern_body.len = VARHDRSZ;
@@ -1394,10 +1402,11 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	 * Setup walker's context
 	 */
 	memset(&context, 0, sizeof(codegen_context));
+	context.nattrs = baserel->max_attr;
 	context.attrs = palloc0(sizeof(FormData_pg_attribute) *
 							baserel->max_attr);
 
-	pull_varattnos((Node *)kernel_quals, baserel->relid, &varattnos);
+	pull_varattnos((Node *)kernel_expr, baserel->relid, &varattnos);
 	attidx = 0;
 	while ((attnum = bms_first_member(varattnos)) >= 0)
 	{
@@ -1440,6 +1449,7 @@ pgstrom_codegen_qual(PlannerInfo *root,
 
 		appendStringInfo(&kern_body, "%s\n", tinfo->type_define);
 	}
+	appendStringInfoChar(&kern_body, '\n');
 
 	/* add function definition */
 	foreach (cell, context.func_list)
@@ -1448,7 +1458,6 @@ pgstrom_codegen_qual(PlannerInfo *root,
 
 		appendStringInfo(&kern_body, "%s\n", finfo->func_define);
 	}
-
 
 	appendStringInfo(
 		&kern_body,
@@ -1463,17 +1472,13 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		"  char_v rmap;\n"
 		"  pg_char_v result;\n"
 		"\n"
-		"  rmap = pg_vload(get_global_id(0),\n"
-		"                  ((__global char *)kargs) +\n"
-		"                  kargs->offset[kargs->i_rowmap]);\n"
+		"  rmap = pg_vload(get_global_id(0), ROWMAP_BASE(kargs));\n"
 		"  result = (%s);\n"
 		"  rmap |= ((rmap == (char)0) &\n"
-		"           (result.isnull != 0) & STROMCL_ERRCODE_ROW_DELETED;\n"
+		"           (result.isnull != 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
 		"  rmap |= ((rmap == (char)0) &\n"
-		"           (result.value == 0) & STROMCL_ERRCODE_ROW_DELETED;\n"
-		"  pg_vstore(rmap, get_global_id(0),\n"
-		"            ((__global char *)kargs) +\n"
-		"            kargs->offset[kargs->i_rowmap]);\n"
+		"           (result.value == 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
+		"  pg_vstore(rmap, get_global_id(0), ROWMAP_BASE(kargs));\n"
 		"}\n\n", kern_qual.data);
 
 	*p_kernel_cols = kernel_cols;

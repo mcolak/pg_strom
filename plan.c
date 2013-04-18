@@ -257,7 +257,7 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 	{
 		Node	   *kernel_expr;
 		text	   *kernel_source;
-		char		kernel_md5[VARHDRSZ + 16];	/* MD5 has 128bit length */
+		char	   *kernel_md5;
 		List	   *kernel_params = NIL;
 		List	   *kernel_cols = NIL;
 		List	   *dpcxt;
@@ -278,27 +278,29 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 							(Node *)makeConst(TEXTOID,
 											  -1,
 											  InvalidOid,
-											  VARSIZE(kernel_source),
+											  -1,
 											  PointerGetDatum(kernel_source),
 											  false,
 											  false));
 		fdw_private = lappend(fdw_private, defel);
 
 		/* calculation of MD5 digest */
+		kernel_md5 = palloc(VARHDRSZ + MD5_SIZE);
 		if (!pg_md5_binary(VARDATA(kernel_source),
 						   VARSIZE_ANY_EXHDR(kernel_source),
 						   kernel_md5 + VARHDRSZ))
 			elog(ERROR, "internal error on calculation of MD5");
-		SET_VARSIZE(kernel_md5, sizeof(kernel_md5));
+		SET_VARSIZE(kernel_md5, VARHDRSZ + MD5_SIZE);
 
 		defel = makeDefElem("kernel_md5",
 							(Node *)makeConst(BYTEAOID,
 											  -1,
 											  InvalidOid,
-											  sizeof(kernel_md5),
+											  -1,
 											  PointerGetDatum(kernel_md5),
 											  false,
 											  false));
+
 		fdw_private = lappend(fdw_private, defel);
 
 		/* save the parameters referenced by kernel */
@@ -328,7 +330,7 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 		relform = (Form_pg_class) GETSTRUCT(tuple);
 
 		dpcxt = deparse_context_for(NameStr(relform->relname),
-									relform->relnamespace);
+									foreigntableid);
 		dpsrc = deparse_expression(kernel_expr, dpcxt, false, false);
 		dptxt = cstring_to_text(dpsrc);
 		defel = makeDefElem("kernel_quals",

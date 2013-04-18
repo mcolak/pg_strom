@@ -1,26 +1,29 @@
 #ifndef OPENCL_COMMON_H
 #define OPENCL_COMMON_H
+/*
+ * opencl_serv always adds -DSTROMCL_VECTOR_WIDTH=<width> on kernel
+ * build, but not for host code. So, the #if ... #endif block is
+ * available only opencl code.
+ */
+#ifdef STROMCL_VECTOR_WIDTH
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
-/* Kernel parameters and arguments */
-typedef struct {
-	int			p_nums;			/* number of parameters */
-	int			p_offset[0];	/* value offset. 0 means NULL */
-} kern_params_t;
-
-typedef struct {
-	int			nattrs;
-	int			nitems;
-	int			i_rowmap;
-	struct {
-		int		isnull;
-		int		values;
-	} offset[0];
-} kern_args_t;
 
 /* NULL definition */
 #define NULL	((void *) 0)
 
-/* stuff related to varlena */
+/* type definitions for APIs */
+typedef char		cl_char;
+typedef uchar		cl_uchar;
+typedef short		cl_short;
+typedef ushort		cl_ushort;
+typedef int			cl_int;
+typedef uint		cl_uint;
+typedef long		cl_long;
+typedef ulong		cl_ulong;
+typedef float		cl_float;
+typedef double		cl_double;
+
+/* Stuff related to varlena */
 typedef struct {
 	int		vl_len;
 	char	vl_dat[1];
@@ -139,13 +142,6 @@ typedef double		double_v;
 #define IF_VEC02(X)
 #define IF_VEC01(X)			X
 #endif
-
-/* Error codes */
-#define STROMCL_ERRCODE_SUCCESS				((char)0x00)
-#define STROMCL_ERRCODE_ROW_DELETED			((char)0x01)
-#define STROMCL_ERRCODE_DIV_BY_ZERO			((char)0x02)
-#define STROMCL_ERRCODE_OUT_OF_RANGE		((char)0x03)
-#define STROMCL_ERRCODE_INTERNAL			((char)0xff)
 
 /* template for native types */
 #define STROMCL_NATIVE_DATATYPE_TEMPLATE(NAME,BASE)	\
@@ -419,5 +415,40 @@ typedef double		double_v;
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
+
+/* misc definitions */
+#define ROWMAP_BASE(kargs)						\
+	(((__global char *)(kargs)) + (kargs)->offset[(kargs)->i_rowmap])
+
+#endif	/* STROMCL_VECTOR_WIDTH */
+/*
+ * Kernel Parameters - 1st argument of kernel function
+ */
+typedef struct {
+	cl_int		p_nums;			/* number of parameters */
+	cl_int		p_offset[0];	/* value offset. 0 means NULL */
+} kern_params_t;
+
+/*
+ * Kernel Arguments - 2nd argument of kernel function
+ */
+typedef struct {
+	cl_int		nattrs;
+	cl_int		nitems;
+	cl_int		i_rowmap;
+	struct {
+		cl_int	isnull;
+		cl_int	values;
+	} offset[0];
+} kern_args_t;
+
+/*
+ * Error codes
+ */
+#define STROMCL_ERRCODE_SUCCESS				((char)0x00)	/* OK */
+#define STROMCL_ERRCODE_DIV_BY_ZERO			((char)0x20)
+#define STROMCL_ERRCODE_OUT_OF_RANGE		((char)0x21)
+#define STROMCL_ERRCODE_INTERNAL			((char)0x22)
+#define STROMCL_ERRCODE_ROW_MASKED			((char)0xff)	/* masked */
 
 #endif	/* OPENCL_COMMON_H */
