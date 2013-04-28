@@ -21,11 +21,6 @@
 
 PG_MODULE_MAGIC;
 
-#ifdef PGSTROM_PRINT_DEBUG
-/* for GUC pgstrom.print_debug */
-bool	pgstrom_pring_debug;
-#endif
-
 /*
  * Local declarations
  */
@@ -103,17 +98,6 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
-#ifdef PGSTROM_PRINT_DEBUG
-	/* allows debug output? */
-	DefineCustomBoolVariable("pg_strom.print_debug",
-							 "enables debug messaged of PG-Strom",
-							 NULL,
-							 &pgstrom_print_debug,
-							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-#endif
 	/* Initialize shared memory management */
 	pgstrom_shmem_init();
 

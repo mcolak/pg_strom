@@ -191,7 +191,7 @@ typedef double		double_v;
 /* Template of pg_vref_<name> function for native types */
 #define STROMCL_NATIVE_VARREF_TEMPLATE(NAME,BASE)					\
 	static pg_##NAME##_v pg_##NAME##_vref(							\
-		__private int attnum,										\
+		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
 		__global char *kvlbuf)										\
@@ -199,7 +199,6 @@ typedef double		double_v;
 		pg_##NAME##_v result;										\
 		__global BASE *p_values;									\
 		__global char *p_isnull;									\
-		int j = attnum + kargs->i_rowmap;							\
 																	\
 		if (kargs->offset[j].isnull == 0)							\
 			result.isnull = (char)0;								\
@@ -219,7 +218,7 @@ typedef double		double_v;
 /* Template of pg_<name>_vref function for simple types */
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)					\
 	static pg_##NAME##_v pg_##NAME##_vref(							\
-		__private int attnum,										\
+		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
 		__global char *kvlbuf)										\
@@ -227,7 +226,6 @@ typedef double		double_v;
 		pg_##NAME##_v result;										\
 		__global BASE *p_values;									\
 		__global char *p_isnull;									\
-		int j = attnum + kargs->i_rowmap;							\
 																	\
 		if (kargs->offset[j].isnull == 0)							\
 			result.isnull = (char)0;								\
@@ -262,7 +260,7 @@ typedef double		double_v;
 /* Template of pg_vref_<name> function for non-native types */
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
 	static pg_##NAME##_v pg_##NAME##_vref(							\
-		__private int attnum,										\
+		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
 		__global char *kvlbuf)										\
@@ -271,7 +269,6 @@ typedef double		double_v;
 		__global varlena *p_values;									\
 		__global uint *p_offset										\
 		__global char *p_isnull;									\
-		int j = attnum + kargs->i_rowmap;							\
 																	\
 		if (kargs->offset[j].isnull == 0)							\
 			ret.isnull = (char)0;									\
@@ -418,7 +415,7 @@ typedef double		double_v;
 
 /* misc definitions */
 #define ROWMAP_BASE(kargs)						\
-	(((__global char *)(kargs)) + (kargs)->offset[(kargs)->i_rowmap])
+	(((__global char *)(kargs)) + (kargs)->offset[(kargs)->i_rowmap].values)
 
 #endif	/* STROMCL_VECTOR_WIDTH */
 /*
@@ -433,9 +430,9 @@ typedef struct {
  * Kernel Arguments - 2nd argument of kernel function
  */
 typedef struct {
-	cl_int		nattrs;
-	cl_int		nitems;
-	cl_int		i_rowmap;
+	cl_int		nargs;		/* number of argumens */
+	cl_int		i_rowmap;	/* index to rowmap field */
+	cl_int		nitems;		/* number of items */
 	struct {
 		cl_int	isnull;
 		cl_int	values;

@@ -488,6 +488,28 @@ pgstrom_queue_try_dequeue(StromQueue *queue)
 	return result;
 }
 
+/*
+ * pgstrom_queue_wakeup
+ *
+ * It wakes up threads waiting for the supplied queue. Signal handler
+ * should NOT call this interface with is_broadcase = false due to
+ * the restriction of pthread_cond_signal(); that may cause a deadlock.
+ */
+void
+pgstrom_queue_wakeup(StromQueue *queue, bool is_broadcast)
+{
+	if (is_broadcast)
+	{
+		if (pthread_cond_broadcast(&queue->cond) != 0)
+			elog(FATAL, "failed on pthread_cond_broadcast");
+	}
+	else
+	{
+		if (pthread_cond_signal(&queue->cond) != 0)
+			elog(FATAL, "failed on pthread_cond_signal");
+	}
+}
+
 bool
 pgstrom_queue_is_empty(StromQueue *queue)
 {
@@ -1378,6 +1400,12 @@ pgstrom_shmem_startup(void)
 	dlist_push_head(&pgstrom_shmem_head->addr_head, &block->addr_list);
 	dlist_push_head(&pgstrom_shmem_head->free_head, &block->free_list);
 	block->size = pgstrom_shmem_head->total_size;
+
+	/* startup routines of other modules */
+	pgstrom_opencl_server_startup((uintptr_t) pgstrom_shmem_head,
+								  (uintptr_t) pgstrom_shmem_head +
+								  offsetof(ShmemHead, first_block) +
+								  pgstrom_shmem_head->total_size);
 }
 
 void
@@ -1423,15 +1451,6 @@ pgstrom_shmem_init(void)
 
 	/* registration of shared-memory cleanup handler  */
 	RegisterResourceReleaseCallback(pgstrom_shmem_cleanup, NULL);
-}
-
-void
-pgstrom_shmem_range(uintptr_t *start, uintptr_t *end)
-{
-	*start = (uintptr_t) pgstrom_shmem_head;
-	*end   = (uintptr_t) pgstrom_shmem_head
-		+ offsetof(ShmemHead, first_block)
-		+ pgstrom_shmem_head->total_size;
 }
 
 /*

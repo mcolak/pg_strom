@@ -521,6 +521,9 @@ static struct {
 	/* true, if this function can handle/return vector values */
 	bool	func_is_vector;
 
+	/* mask of CL_DEVICE_TYPE_* where function can run */
+	cl_device_type func_devtype;
+
 	/* static definition of this function */
 	char   *func_define;
 
@@ -532,451 +535,507 @@ static struct {
 	const char	   *func_data;
 } opencl_func_catalog[] = {
 	/* cast of data types */
-	{ "int2",   1, {INT4OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int2",   1, {INT8OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int2",   1, {FLOAT4OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int2",   1, {FLOAT8OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int4",   1, {INT2OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int4",   1, {INT8OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int4",   1, {FLOAT4OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int4",   1, {FLOAT8OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int8",   1, {INT4OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int8",   1, {INT8OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int8",   1, {FLOAT4OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "int8",   1, {FLOAT8OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float4", 1, {INT2OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float4", 1, {INT4OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float4", 1, {INT8OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float4", 1, {FLOAT8OID}, true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float8", 1, {INT2OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float8", 1, {INT4OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float8", 1, {INT8OID},   true, NULL, clfunc_cb_native_cast, NULL },
-	{ "float8", 1, {FLOAT8OID}, true, NULL, clfunc_cb_native_cast, NULL },
+	{ "int2",   1, {INT4OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int2",   1, {INT8OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int2",   1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int2",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int4",   1, {INT2OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int4",   1, {INT8OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int4",   1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int4",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int8",   1, {INT4OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int8",   1, {INT8OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int8",   1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "int8",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float4", 1, {INT2OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float4", 1, {INT4OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float4", 1, {INT8OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float4", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float8", 1, {INT2OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float8", 1, {INT4OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float8", 1, {INT8OID},   true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
+	{ "float8", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
+	  NULL, clfunc_cb_native_cast, NULL },
 
 	/* '+' : add operators */
-	{ "int2pl",  2, {INT2OID, INT2OID}, true,
+	{ "int2pl",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int24pl", 2, {INT2OID, INT4OID}, true,
+	{ "int24pl", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int28pl", 2, {INT2OID, INT8OID}, true,
+	{ "int28pl", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int42pl", 2, {INT4OID, INT2OID}, true,
+	{ "int42pl", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int4pl",  2, {INT4OID, INT4OID}, true,
+	{ "int4pl",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int48pl", 2, {INT4OID, INT8OID}, true,
+	{ "int48pl", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int82pl", 2, {INT8OID, INT2OID}, true,
+	{ "int82pl", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int84pl", 2, {INT8OID, INT4OID}, true,
+	{ "int84pl", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "int8pl",  2, {INT8OID, INT8OID}, true,
+	{ "int8pl",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4pl",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48pl", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "float84pl", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84pl", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
-	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8pl",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "+" },
 
 	/* '-' : substract operators */
-	{ "int2mi",  2, {INT2OID, INT2OID}, true,
+	{ "int2mi",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int24mi", 2, {INT2OID, INT4OID}, true,
+	{ "int24mi", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int28mi", 2, {INT2OID, INT8OID}, true,
+	{ "int28mi", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int42mi", 2, {INT4OID, INT2OID}, true,
+	{ "int42mi", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int4mi",  2, {INT4OID, INT4OID}, true,
+	{ "int4mi",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int48mi", 2, {INT4OID, INT8OID}, true,
+	{ "int48mi", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int82mi", 2, {INT8OID, INT2OID}, true,
+	{ "int82mi", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int84mi", 2, {INT8OID, INT4OID}, true,
+	{ "int84mi", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "int8mi",  2, {INT8OID, INT8OID}, true,
+	{ "int8mi",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4mi",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48mi", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "float84mi", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84mi", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
-	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8mi",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "-" },
 
 	/* '*' : multiply operators */
-	{ "int2mul",  2, {INT2OID, INT2OID}, true,
+	{ "int2mul",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int24mul", 2, {INT2OID, INT4OID}, true,
+	{ "int24mul", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int28mul", 2, {INT2OID, INT8OID}, true,
+	{ "int28mul", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int42mul", 2, {INT4OID, INT2OID}, true,
+	{ "int42mul", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int4mul",  2, {INT4OID, INT4OID}, true,
+	{ "int4mul",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int48mul", 2, {INT4OID, INT8OID}, true,
+	{ "int48mul", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int82mul", 2, {INT8OID, INT2OID}, true,
+	{ "int82mul", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int84mul", 2, {INT8OID, INT4OID}, true,
+	{ "int84mul", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "int8mul",  2, {INT8OID, INT8OID}, true,
+	{ "int8mul",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4mul",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48mul", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "float84mul", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84mul", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
-	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8mul",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "*" },
 
 	/* '/' : divide operators */
-	{ "int2div",  2, {INT2OID, INT2OID}, true,
+	{ "int2div",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int24div", 2, {INT2OID, INT4OID}, true,
+	{ "int24div", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int28div", 2, {INT2OID, INT8OID}, true,
+	{ "int28div", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int42div", 2, {INT4OID, INT2OID}, true,
+	{ "int42div", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int4div",  2, {INT4OID, INT4OID}, true,
+	{ "int4div",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int48div", 2, {INT4OID, INT8OID}, true,
+	{ "int48div", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int82div", 2, {INT8OID, INT2OID}, true,
+	{ "int82div", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int84div", 2, {INT8OID, INT4OID}, true,
+	{ "int84div", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "int8div",  2, {INT8OID, INT8OID}, true,
+	{ "int8div",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4div",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48div", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84div", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
-	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8div",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "/" },
 
 	/* '%' : reminder operators */
-	{ "int2mod", 2, {INT2OID, INT2OID}, true,
+	{ "int2mod", 2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "%" },
-	{ "int4mod", 2, {INT4OID, INT4OID}, true,
+	{ "int4mod", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "%" },
-	{ "int8mod", 2, {INT8OID, INT8OID}, true,
+	{ "int8mod", 2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "%" },
 
 	/* '+' : unary plus operators */
-	{ "int2up", 1, {INT2OID}, true,
+	{ "int2up", 1, {INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "+" },
-	{ "int4up", 1, {INT4OID}, true,
+	{ "int4up", 1, {INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "+" },
-	{ "int8up", 1, {INT8OID}, true,
+	{ "int8up", 1, {INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "+" },
-	{ "float4up", 1, {FLOAT4OID}, true,
+	{ "float4up", 1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "+" },
-	{ "float8up", 1, {FLOAT8OID}, true,
+	{ "float8up", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "+" },
 
 	/* '-' : unary minus operators */
-	{ "int2um", 1, {INT2OID}, true,
+	{ "int2um", 1, {INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "-" },
-	{ "int2um", 1, {INT4OID}, true,
+	{ "int2um", 1, {INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "-" },
-	{ "int2um", 1, {INT8OID}, true,
+	{ "int2um", 1, {INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "-" },
-	{ "float4um", 1, {FLOAT4OID}, true,
+	{ "float4um", 1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "-" },
-	{ "float8um", 1, {FLOAT8OID}, true,
+	{ "float8um", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "-" },
 
 	/* '@' : absolute value operators */
-	{ "int2abs",   1, {INT2OID}, true,
+	{ "int2abs",   1, {INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "abs" },
-	{ "int4abs",   1, {INT4OID}, true,
+	{ "int4abs",   1, {INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "abs" },
-	{ "int8abs",   1, {INT8OID}, true,
+	{ "int8abs",   1, {INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "abs" },
-	{ "float4abs", 1, {FLOAT4OID}, true,
+	{ "float4abs", 1, {FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "abs" },
-	{ "float8abs", 1, {FLOAT8OID}, true,
+	{ "float8abs", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "abs" },
 
 	/* '=' : equal operators */
-	{ "int2eq",  2, {INT2OID, INT2OID}, true,
+	{ "int2eq",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int24eq", 2, {INT2OID, INT4OID}, true,
+	{ "int24eq", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int28eq", 2, {INT2OID, INT8OID}, true,
+	{ "int28eq", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int42eq", 2, {INT4OID, INT2OID}, true,
+	{ "int42eq", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int4eq",  2, {INT4OID, INT4OID}, true,
+	{ "int4eq",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int48eq", 2, {INT4OID, INT8OID}, true,
+	{ "int48eq", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int82eq", 2, {INT8OID, INT2OID}, true,
+	{ "int82eq", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int84eq", 2, {INT8OID, INT4OID}, true,
+	{ "int84eq", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "int8eq",  2, {INT8OID, INT8OID}, true,
+	{ "int8eq",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
-	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "==" },
 
 	/* '<>' : not equal operators */
-	{ "int2ne",  2, {INT2OID, INT2OID}, true,
+	{ "int2ne",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int24ne", 2, {INT2OID, INT4OID}, true,
+	{ "int24ne", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int28ne", 2, {INT2OID, INT8OID}, true,
+	{ "int28ne", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int42ne", 2, {INT4OID, INT2OID}, true,
+	{ "int42ne", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int4ne",  2, {INT4OID, INT4OID}, true,
+	{ "int4ne",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int48ne", 2, {INT4OID, INT8OID}, true,
+	{ "int48ne", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int82ne", 2, {INT8OID, INT2OID}, true,
+	{ "int82ne", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int84ne", 2, {INT8OID, INT4OID}, true,
+	{ "int84ne", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "int8ne",  2, {INT8OID, INT8OID}, true,
+	{ "int8ne",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
-	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "!=" },
 
 	/* '>'  : relational greater-than */
-	{ "int2gt",  2, {INT2OID, INT2OID}, true,
+	{ "int2gt",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int24gt", 2, {INT2OID, INT4OID}, true,
+	{ "int24gt", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int28gt", 2, {INT2OID, INT8OID}, true,
+	{ "int28gt", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int42gt", 2, {INT4OID, INT2OID}, true,
+	{ "int42gt", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int4gt",  2, {INT4OID, INT4OID}, true,
+	{ "int4gt",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int48gt", 2, {INT4OID, INT8OID}, true,
+	{ "int48gt", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int82gt", 2, {INT8OID, INT2OID}, true,
+	{ "int82gt", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int84gt", 2, {INT8OID, INT4OID}, true,
+	{ "int84gt", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "int8gt",  2, {INT8OID, INT8OID}, true,
+	{ "int8gt",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
-	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">" },
 
 	/* '<'  : relational less-than */
-	{ "int2lt",  2, {INT2OID, INT2OID}, true,
+	{ "int2lt",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int24lt", 2, {INT2OID, INT4OID}, true,
+	{ "int24lt", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int28lt", 2, {INT2OID, INT8OID}, true,
+	{ "int28lt", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int42lt", 2, {INT4OID, INT2OID}, true,
+	{ "int42lt", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int4lt",  2, {INT4OID, INT4OID}, true,
+	{ "int4lt",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int48lt", 2, {INT4OID, INT8OID}, true,
+	{ "int48lt", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int82lt", 2, {INT8OID, INT2OID}, true,
+	{ "int82lt", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int84lt", 2, {INT8OID, INT4OID}, true,
+	{ "int84lt", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "int8lt",  2, {INT8OID, INT8OID}, true,
+	{ "int8lt",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
-	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<" },
 
 	/* '>=' : relational greater-than or equal-to */
-	{ "int2ge",  2, {INT2OID, INT2OID}, true,
+	{ "int2ge",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int24ge", 2, {INT2OID, INT4OID}, true,
+	{ "int24ge", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int28ge", 2, {INT2OID, INT8OID}, true,
+	{ "int28ge", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int42ge", 2, {INT4OID, INT2OID}, true,
+	{ "int42ge", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int4ge",  2, {INT4OID, INT4OID}, true,
+	{ "int4ge",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int48ge", 2, {INT4OID, INT8OID}, true,
+	{ "int48ge", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int82ge", 2, {INT8OID, INT2OID}, true,
+	{ "int82ge", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int84ge", 2, {INT8OID, INT4OID}, true,
+	{ "int84ge", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "int8ge",  2, {INT8OID, INT8OID}, true,
+	{ "int8ge",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
-	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">=" },
 
 	/* '<=' : relational less-than or equal to */
-	{ "int2le",  2, {INT2OID, INT2OID}, true,
+	{ "int2le",  2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int24le", 2, {INT2OID, INT4OID}, true,
+	{ "int24le", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int28le", 2, {INT2OID, INT8OID}, true,
+	{ "int28le", 2, {INT2OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int42le", 2, {INT4OID, INT2OID}, true,
+	{ "int42le", 2, {INT4OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int4le",  2, {INT4OID, INT4OID}, true,
+	{ "int4le",  2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int48le", 2, {INT4OID, INT8OID}, true,
+	{ "int48le", 2, {INT4OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int82le", 2, {INT8OID, INT2OID}, true,
+	{ "int82le", 2, {INT8OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int84le", 2, {INT8OID, INT4OID}, true,
+	{ "int84le", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "int8le",  2, {INT8OID, INT8OID}, true,
+	{ "int8le",  2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, true,
+	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, true,
+	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, true,
+	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
-	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<=" },
 
 	/* '&'  : bitwise and */
-	{ "int2and", 2, {INT2OID, INT2OID}, true,
+	{ "int2and", 2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "&" },
-	{ "int4and", 2, {INT4OID, INT4OID}, true,
+	{ "int4and", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "&" },
-	{ "int8and", 2, {INT8OID, INT8OID}, true,
+	{ "int8and", 2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "&" },
 
 	/* '|'  : bitwise or */
-	{ "int2or", 2, {INT2OID, INT2OID}, true,
+	{ "int2or", 2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "|" },
-	{ "int4or", 2, {INT4OID, INT4OID}, true,
+	{ "int4or", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "|" },
-	{ "int8or", 2, {INT8OID, INT8OID}, true,
+	{ "int8or", 2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "|" },
 
 	/* '#'  : bitwise xor */
-	{ "int2xor", 2, {INT2OID, INT2OID}, true,
+	{ "int2xor", 2, {INT2OID, INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "^" },
-	{ "int4xor", 2, {INT4OID, INT4OID}, true,
+	{ "int4xor", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "^" },
-	{ "int8xor", 2, {INT8OID, INT8OID}, true,
+	{ "int8xor", 2, {INT8OID, INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "^" },
 
 	/* '~'  : bitwise not operators */
-	{ "int2not", 1, {INT2OID}, true,
+	{ "int2not", 1, {INT2OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "~" },
-	{ "int4not", 1, {INT4OID}, true,
+	{ "int4not", 1, {INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "~" },
-	{ "int8not", 1, {INT8OID}, true,
+	{ "int8not", 1, {INT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_left_oper, "~" },
 
 	/* '>>' : right shift */
-	{ "int2shr", 2, {INT2OID, INT4OID}, true,
+	{ "int2shr", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">>" },
-	{ "int4shr", 2, {INT4OID, INT4OID}, true,
+	{ "int4shr", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">>" },
-	{ "int8shr", 2, {INT8OID, INT4OID}, true,
+	{ "int8shr", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, ">>" },
 
 	/* '<<' : left shift */
-	{ "int2shl", 2, {INT2OID, INT4OID}, true,
+	{ "int2shl", 2, {INT2OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<<" },
-	{ "int4shl", 2, {INT4OID, INT4OID}, true,
+	{ "int4shl", 2, {INT4OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<<" },
-	{ "int8shl", 2, {INT8OID, INT4OID}, true,
+	{ "int8shl", 2, {INT8OID, INT4OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_both_oper, "<<" },
 
 	/* Mathmatical functions */
-	{ "cbrt", 1, {FLOAT8OID}, true,
+	{ "cbrt", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:cbrt" },
-	{ "ceil", 1, {FLOAT8OID}, true,
+	{ "ceil", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:ceil" },
-	{ "exp", 1, {FLOAT8OID},  true,
+	{ "exp", 1, {FLOAT8OID},  true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:exp" },
-	{ "floor", 1, {FLOAT8OID}, true,
+	{ "floor", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:floor" },
-	{ "ln", 1, {FLOAT8OID}, true,
+	{ "ln", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:log" },
-	{ "log", 1, {FLOAT8OID}, true,
+	{ "log", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:log10" },
-	{ "pi", 1, {FLOAT8OID}, false,
+	{ "pi", 1, {FLOAT8OID}, false, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "c:3.14159265358979323846" },
-	{ "power", 2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "power", 2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:pow" },
-	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:pow" },
-	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:pow" },
-	{ "round", 1, {FLOAT8OID}, true,
+	{ "round", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:round" },
-	{ "sign", 1, {FLOAT8OID}, true,
+	{ "sign", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:sign" },
-	{ "sqrt", 1, {FLOAT8OID}, true,
+	{ "sqrt", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:sqrt" },
-	{ "dsqrt", 1, {FLOAT8OID}, true,
+	{ "dsqrt", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:sqrt" },
-	{ "trunc", 1, {FLOAT8OID}, true,
+	{ "trunc", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:trunc" },
-	{ "dtrunc", 1, {FLOAT8OID}, true,
+	{ "dtrunc", 1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:trunc" },
 
 	/* Trigonometric function */
-	{ "acos",  1, {FLOAT8OID}, true,
+	{ "acos",  1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:acos" },
-	{ "asin",  1, {FLOAT8OID}, true,
+	{ "asin",  1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:asin" },
-	{ "atan",  1, {FLOAT8OID}, true,
+	{ "atan",  1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:atan" },
-	{ "atan2", 2, {FLOAT8OID, FLOAT8OID}, true,
+	{ "atan2", 2, {FLOAT8OID, FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:atan2" },
-	{ "cos",   1, {FLOAT8OID}, true,
+	{ "cos",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:cos" },
-	{ "cot",   1, {FLOAT8OID}, true,
+	{ "cot",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:cot" },
-	{ "sin",   1, {FLOAT8OID}, true,
+	{ "sin",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:sin" },
-	{ "tan",   1, {FLOAT8OID}, true,
+	{ "tan",   1, {FLOAT8OID}, true, CL_DEVICE_TYPE_ALL,
 	  NULL, clfunc_cb_builtin_math, "f:tan" },
 };
+
+static inline void
+clfunc_increment_type_usecnt(clFuncInfo *finfo, const clTypeInfo *tinfo)
+{
+	if (!tinfo->type_is_native)
+		return;
+
+	switch (tinfo->type_oid)
+	{
+		case BOOLOID:
+			finfo->func_usecnt_char += 2;
+			break;
+		case INT2OID:
+			finfo->func_usecnt_short += 2;
+			break;
+		case INT4OID:
+			finfo->func_usecnt_int += 2;
+			finfo->func_usecnt_float++;
+			break;
+		case INT8OID:
+			finfo->func_usecnt_long += 2;
+			finfo->func_usecnt_double++;
+			break;
+		case FLOAT4OID:
+			finfo->func_usecnt_float += 2;
+			finfo->func_usecnt_int++;
+			break;
+		case FLOAT8OID:
+			finfo->func_usecnt_double += 2;
+			finfo->func_usecnt_long++;
+			break;
+		default:
+			/* do nothing */
+			break;
+	}
+}
 
 static clFuncInfo *
 pgstrom_clfunc_lookup_raw(const char *func_name,
@@ -1021,6 +1080,7 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 								   sizeof(clTypeInfo *) * func_argtypes->dim1);
 	finfo->hash = hash;
 	finfo->func_name = MemoryContextStrdup(CacheMemoryContext, func_name);
+	finfo->func_usecnt_int = 1;	/* give small advantage on int-vector */
 	finfo->func_nargs = func_argtypes->dim1;
 	finfo->func_argtypes_oid = (Oid *)(finfo->func_argtypes +
 									   func_argtypes->dim1);
@@ -1028,6 +1088,8 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 	if (!finfo->func_rettype)
 		elog(ERROR, "failed to lookup clTypeInfo of %s",
 			 format_type_be(func_rettype));
+	clfunc_increment_type_usecnt(finfo, finfo->func_rettype);
+
 	for (k=0; k < func_argtypes->dim1; k++)
 	{
 		finfo->func_argtypes[k] =
@@ -1066,6 +1128,9 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 													true);
 			finfo->func_memsz = NULL;
 			MemoryContextSwitchTo(oldcxt);
+
+			/* available device types */
+			finfo->func_devtype = opencl_func_catalog[j].func_devtype;
 
 			/*
 			 * opencl function name shall be pg_##NAME##(arg1, ...) in
@@ -1176,6 +1241,13 @@ typedef struct {
 	List		   *type_list;
 	List		   *func_list;
 	List		   *kernel_params;
+	cl_device_type	allowed_devtype;
+	int				usecnt_char;
+	int				usecnt_short;
+	int				usecnt_int;
+	int				usecnt_long;
+	int				usecnt_float;
+	int				usecnt_double;
 	AttrNumber		nattrs;
 	FormData_pg_attribute *attrs;
 } codegen_context;
@@ -1223,6 +1295,15 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 		index++;
 	}
 	appendStringInfo(buf, ")");
+
+	/* adjust planner hint */
+	context->allowed_devtype &= finfo->func_devtype;
+	context->usecnt_char     += finfo->func_usecnt_char;
+	context->usecnt_short    += finfo->func_usecnt_short;
+	context->usecnt_int      += finfo->func_usecnt_int;
+	context->usecnt_long     += finfo->func_usecnt_long;
+	context->usecnt_float    += finfo->func_usecnt_float;
+	context->usecnt_double   += finfo->func_usecnt_double;
 }
 
 static void
@@ -1347,7 +1428,7 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 		context->type_list = list_append_unique(context->type_list, tinfo);
 		appendStringInfo(buf, "pg_%s_vref(%u,rowidx,kargs,kvlbuf)",
 						 tinfo->type_name,
-						 attr->attnum);
+						 attr->attnum - 1);
 	}
 	else if (IsA(expr, FuncExpr))
 	{
@@ -1376,8 +1457,10 @@ text *
 pgstrom_codegen_qual(PlannerInfo *root,
 					 RelOptInfo *baserel,
 					 Node *kernel_expr,
-					 List **p_kernel_params,	/* out */
-					 List **p_kernel_cols)	/* out */
+					 List **p_kernel_params,			/* out */
+					 List **p_kernel_cols,				/* out */
+					 cl_device_type *p_allowed_devtype,	/* out */
+					 char **p_vector_preference)			/* out */
 {
 	codegen_context	context;
 	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
@@ -1385,6 +1468,8 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	HeapTuple		tuple;
 	int				attnum;
 	int				attidx;
+	const char	   *vector_curr;
+	int				usecnt_curr;
 	ListCell	   *cell;
 	List		   *kernel_cols = NIL;
 	StringInfoData	kern_qual;
@@ -1402,6 +1487,7 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	 * Setup walker's context
 	 */
 	memset(&context, 0, sizeof(codegen_context));
+	context.allowed_devtype = CL_DEVICE_TYPE_ALL;
 	context.nattrs = baserel->max_attr;
 	context.attrs = palloc0(sizeof(FormData_pg_attribute) *
 							baserel->max_attr);
@@ -1459,32 +1545,71 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		appendStringInfo(&kern_body, "%s\n", finfo->func_define);
 	}
 
+	/*
+	 * XXX - Logic needs to be adjusted once we support multiple computing
+	 * units per row. A computing unit is mapped per row right now, so we
+	 * assume all the calculation shall be done in sindle-thread.
+	 */
 	appendStringInfo(
 		&kern_body,
 		"__kernel void kernel_qual(\n"
-		"  __global kern_params_t *kparams,\n"
-		"  __global kern_arg_t    *kargs,\n"
-		"  __global char          *kvlbuf,\n"
-		"  __global char          *kwkmem)\n"
+		"  __private int            nitems,\n"
+		"  __global  kern_params_t *kparams,\n"
+		"  __global  kern_arg_t    *kargs,\n"
+		"  __global  char          *kvlbuf,\n"
+		"  __global  char          *gwkmem)\n"
 		"{\n"
-		"  int nitems = kargs->nitems;\n"
-		"  int rowidx = get_global_id(0) * STROMCL_VECTOR_WIDTH;\n"
+		"  int rowidx = get_global_id(1) * STROMCL_VECTOR_WIDTH;\n"
 		"  char_v rmap;\n"
 		"  pg_char_v result;\n"
 		"\n"
-		"  rmap = pg_vload(get_global_id(0), ROWMAP_BASE(kargs));\n"
+		"  if (get_global_id(1) >= get_global_offset(1) + nitems)\n"
+		"    return;\n"
+		"\n"
+		"  rmap = pg_vload(get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"  result = (%s);\n"
 		"  rmap |= ((rmap == (char)0) &\n"
 		"           (result.isnull != 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
 		"  rmap |= ((rmap == (char)0) &\n"
 		"           (result.value == 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
-		"  pg_vstore(rmap, get_global_id(0), ROWMAP_BASE(kargs));\n"
+		"  pg_vstore(rmap, get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"}\n\n", kern_qual.data);
+	SET_VARSIZE(kern_body.data, kern_body.len);
 
 	*p_kernel_cols = kernel_cols;
 	*p_kernel_params = context.kernel_params;
+	*p_allowed_devtype = context.allowed_devtype;
 
-	SET_VARSIZE(kern_body.data, kern_body.len);
+	/* which type is dominative in this calculation? */
+	usecnt_curr = context.usecnt_int;
+	vector_curr = "int";
+	if (context.usecnt_char > usecnt_curr)
+	{
+		usecnt_curr = context.usecnt_char;
+		vector_curr = "char";
+	}
+	if (context.usecnt_short > usecnt_curr)
+	{
+		usecnt_curr = context.usecnt_short;
+		vector_curr = "short";
+	}
+	if (context.usecnt_long > usecnt_curr)
+	{
+		usecnt_curr = context.usecnt_long;
+		vector_curr = "long";
+	}
+	if (context.usecnt_float > usecnt_curr)
+	{
+		usecnt_curr = context.usecnt_float;
+		vector_curr = "float";
+	}
+	if (context.usecnt_double > usecnt_curr)
+	{
+		usecnt_curr = context.usecnt_double;
+		vector_curr = "double";
+	}
+	*p_vector_preference = pstrdup(vector_curr);
+
 	return (text *)kern_body.data;
 }
 

@@ -24,17 +24,8 @@
 #include "opencl_common.h"
 
 /* debug messages */
-#ifdef PGSTROM_PRINT_DEBUG
-extern bool pgstrom_print_debug;
-#define dlog(fmt, ...)									\
-	do {												\
-		if (pgstrom_print_debug)						\
-			elog(INFO, "%s:%d" fmt,						\
-				 __FUNCTION__, __LINE__, __VAR_ARGS__); \
-	} while(0)
-#else
-#define dlog(fmt, ...)
-#endif
+#define dlog(fmt,...)							\
+	elog(DEBUG1, "%s:%d " fmd, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 /* container macro */
 #define container_of(type, field, ptr)			\
@@ -115,9 +106,11 @@ typedef struct {
 
 #define MD5_SIZE	16	/* 128bits */
 typedef struct {
-	kern_params_t  *kernel_params;
-	uint32			kernel_flags;
-	uint8			kernel_digest[MD5_SIZE];
+	kern_params_t  *kparams;
+	uint32			kparams_size;
+	cl_device_type	kernel_devtype;		/* OR-mask of CL_DEVICE_TYPE_* */
+	cl_device_info	vector_preference;	/* CL_DEVICE_PREFERRED_VECTOR_* */
+	char			kernel_md5[MD5_SIZE];
 	text			kernel_source;
 } KernelParams;
 
@@ -131,13 +124,13 @@ typedef struct {
 	dlist_head		vlbuf_list;
 
 	Oid				cb_databaseid;
+	int				cb_nattrs;
 	bool		   *cb_rowmap;
 	bool		  **cb_isnull;
 	void		  **cb_values;
 	FormData_pg_attribute *cb_attrs;
-	uint32		   *offset_isnull;
-	uint32		   *offset_values;
-	int				error_code;
+	kern_args_t	   *cb_kargs;
+	int				error_code;	/* execute status */
 
 	HeapTuple	   *rs_cache;	/* !!private!! array for cache of row-store */
 	MemoryContext	rs_memcxt;	/* !!private!! memory for cache of row-store */
@@ -148,35 +141,28 @@ typedef struct {
 	 */
 	bool			is_loaded;	/* true, if this chunk is fully loaded */
 	bool			is_running;	/* true, if this chunk is running */
-	uint16			nargs;		/* number of arguments field */
-	uint16			nresults;	/* number of results field */
 	uint16			nvarlena;	/* number of varlena buffers */
-	uint64			rowid;		/* head of rowid in this chunk */
+	uint32			varlena_sz;	/* size of largest varlena buffer */
+	uint64			rowid;		/* head rowid of this chunk */
 	uint32			nitems;		/* number of items in this chunk */
-	uint32			offset_results;
-	uint32			length_results;
-	uint32			offset_args;
-	uint32			length_args;
-	Datum			data[1024];	/* minimum 1KB for error messages */
+	uint32			dma_send_start;	/* head of the region to send */
+	uint32			dma_send_end;	/* end of the region to send */
+	uint32			dma_recv_start;	/* head of the region to receive */
+	uint32			dma_recv_end;	/* end of the region to receive */
+	char			data[4096];	/* minimum 4KB for error messages */
 	/*
 	 * ---- data[0] ----
 	 * bool        *cb_isnull[nattrs]
 	 * void        *cb_values[nattrs]
-	 * FormData_pg_attribute cb_attrs[nargs + nresults];
-	 * uint32       offset_isnull[nargs + nresults];
-	 * uint32       offset_values[nargs + nresults];
+	 * FormData_pg_attribute cb_attrs[nargs];
+	 * kern_args_t  kparams;
 	 *   :
-	 * <variable buffer for calculation results>
+	 * <variable buffer for calculation output>
 	 *   :
 	 * bool         cb_rowmap[sizeof(bool) * nitems];
 	 *   :
-	 * <variable buffer for calculation arguments>
+	 * <variable buffer for calculation input>
 	 *   :
-	 *
-	 * Note: offset_isnull/_values for result-columns are represented
-	 * as relative offset from the offset_results. Also, ones for
-	 * argument-columns are represented as relative offset from the
-	 * offset_args.
 	 */
 } ChunkBuffer;
 
@@ -288,6 +274,15 @@ typedef struct {
 	Expr	   *func_nprocs;
 	/* size of required working memory, if needed */
 	Expr	   *func_memsz;
+	/* set of CL_DEVICE_TYPE_* */
+	cl_device_type func_devtype;
+	/* hint to decide vector width */
+	int			func_usecnt_char;
+	int			func_usecnt_short;
+	int			func_usecnt_int;
+	int			func_usecnt_long;
+	int			func_usecnt_float;
+	int			func_usecnt_double;
 	/* function result type */
 	clTypeInfo *func_rettype;
 	/* function arguments type */
@@ -296,7 +291,13 @@ typedef struct {
 	clTypeInfo *func_argtypes[0];
 } clFuncInfo;
 
+/* opencl_common.c */
+extern const char *pgstrom_common_clhead;
+
 /* opencl_serv.c */
+extern void clserv_enqueue_chunk(ChunkBuffer *chunk);
+extern void pgstrom_opencl_server_startup(uintptr_t shmem_start,
+										  uintptr_t shmem_end);
 extern void pgstrom_opencl_server_init(void);
 
 /* opencl_entry.c */
@@ -323,6 +324,7 @@ extern bool pgstrom_queue_enqueue(StromQueue *queue, dlist_node *chain);
 extern dlist_node *pgstrom_queue_dequeue(StromQueue *queue,
 										 unsigned int timeout);
 extern dlist_node *pgstrom_queue_try_dequeue(StromQueue *queue);
+extern void pgstrom_queue_wakeup(StromQueue *queue, bool is_broadcast);
 extern bool pgstrom_queue_is_empty(StromQueue *queue);
 extern void pgstrom_queue_shutdown(StromQueue *queue);
 extern KernelParams *pgstrom_kernel_params_alloc(Size total_length,
@@ -343,7 +345,6 @@ extern DeviceProperty *pgstrom_device_property_next(DeviceProperty *devprop);
 extern Datum pgstrom_opencl_devices(PG_FUNCTION_ARGS);
 
 extern void pgstrom_shmem_init(void);
-extern void pgstrom_shmem_range(uintptr_t *start, uintptr_t *end);
 extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
 
 /* codegen.c */
@@ -353,7 +354,9 @@ extern text *pgstrom_codegen_qual(PlannerInfo *root,
 								  RelOptInfo *baserel,
 								  Node *kernel_expr,
 								  List **kernel_params,	/* out */
-								  List **kernel_cols);	/* out */
+								  List **kernel_cols,   /* out */
+								  cl_device_type *p_allowed_devtype, /* out */
+								  char **p_applied_vector); /* out */
 extern void pgstrom_codegen_init(void);
 
 /* utilcmds.c */

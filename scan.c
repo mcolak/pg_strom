@@ -15,6 +15,7 @@
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/heap.h"
+#include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "executor/executor.h"
 #include "lib/stringinfo.h"
@@ -44,12 +45,11 @@ typedef struct {
 	int				num_running_chunks;
 
 	/* planner's information */
-	text		   *kernel_quals;	/* only for EXPLAIN */
 	List		   *kernel_cols;
 	List		   *result_cols;
 	List		   *varlena_cols;
 	List		   *host_cols;
-	uint32			vlbuf_size;
+	size_t			vlbuf_size;
 	bool			needs_ctid;
 	bool			parallel_load;
 
@@ -93,7 +93,9 @@ static KernelParams *
 extract_kernel_params(EState *estate,
 					  text *kernel_source,
 					  bytea *kernel_md5,
-					  List *kernel_params)
+					  List *kernel_params,
+					  cl_device_type kernel_devtype,
+					  const char *vector_preference)
 {
 	StringInfoData	str;
 	kern_params_t  *kparams;
@@ -205,16 +207,38 @@ extract_kernel_params(EState *estate,
 	 */
 	result = pgstrom_kernel_params_alloc(sizeof(KernelParams) +
 										 VARSIZE(kernel_source) +
-										 str.len, true);
-	memcpy(result->kernel_digest, VARDATA(kernel_md5), MD5_SIZE);
+										 MAXALIGN(str.len), true);
+	memcpy(result->kernel_md5, VARDATA(kernel_md5), MD5_SIZE);
 	memcpy(&result->kernel_source,
 		   VARDATA(kernel_source),
 		   VARSIZE(kernel_source));
-	result->kernel_params = (kern_params_t *)(((char *)result) +
-											  offsetof(KernelParams,
-													   kernel_source) +
-											  VARSIZE(kernel_source));
-	memcpy(result->kernel_params, kparams, str.len);
+	result->kparams = (kern_params_t *)(((char *)result) +
+										offsetof(KernelParams,
+												 kernel_source) +
+										VARSIZE(kernel_source));
+	memcpy(result->kparams, kparams, str.len);
+	result->kparams_size = str.len;
+
+	/* we expect cpu, gpu or accelerator */
+	Assert(kernel_devtype != 0 &&
+		   (kernel_devtype & ~(CL_DEVICE_TYPE_CPU |
+							   CL_DEVICE_TYPE_GPU |
+							   CL_DEVICE_TYPE_ACCELERATOR)) != 0);
+	result->kernel_devtype = kernel_devtype;
+
+	/* preferred vector width */
+	if (strcmp(vector_preference, "char") == 0)
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_CHAR;
+	else if (strcmp(vector_preference, "short") == 0)
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_SHORT;
+	else if (strcmp(vector_preference, "long") == 0)
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_LONG;
+	else if (strcmp(vector_preference, "float") == 0)
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_FLOAT;
+	else if (strcmp(vector_preference, "double") == 0)
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_DOUBLE;
+	else
+		result->vector_preference = CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT;
 
 	pfree(str.data);
 
@@ -225,12 +249,12 @@ static void
 refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 					 uint64 rowid, uint32 nitems)
 {
-	TupleDesc	tupdesc = RelationGetDescr(sestate->frel);
-	uint32		offset = chunk->offset_results;
-	int			nfields = chunk->nresults + chunk->nargs;
-	int			aindex = 0;
-	ListCell   *cell;
-	dlist_mutable_iter  iter;
+	TupleDesc		tupdesc = RelationGetDescr(sestate->frel);
+	kern_args_t	   *kargs = chunk->cb_kargs;
+	int				index;
+	size_t			offset;
+	ListCell	   *cell;
+	dlist_mutable_iter iter;
 
 	Assert(nitems <= PGSTROM_CHUNK_SIZE);
 
@@ -241,8 +265,10 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 			= dlist_container(VarlenaBuffer, chain, iter.cur);
 
 		pgstrom_varlena_buffer_free(vlbuf);
+		chunk->nvarlena--;
 	}
 	Assert(dlist_is_empty(&chunk->vlbuf_list));
+	Assert(chunk->nvarlena == 0);
 
 	/*
 	 * Format of the variable length area is used as follows:
@@ -254,62 +280,82 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	 * |        :                     |
 	 * +------------------------------+
 	 * | Datum data[...]              |
-	 * |        :                     |
-	 * | Variavle Length Field        |
-	 * |        :                     |
-	 * | <---- (char *)chunk->data + offset_results ---+
-	 * |        :                     |                |
-	 * | Fields to be write back      |                |
-	 * | to host from device.         |                |
-	 * | (output of kernel execution) |                |
-	 * |        :                     |                |
-	 * | <---- (char *)chunk->data + offset_nargs --+  |
-	 * | bool  cb_rowmap[nitems]      |             |  |
-	 * | <------------------------------------------|--+
-	 * |        :                     |             |
-	 * | Fields to be sent to OpenCL  |             |
-	 * | device for calculation       |             |
-	 * | (input of kernel execution)  |             |
-	 * |        :                     |             |
-	 * +------------------------------+ <-----------+
+	 * |+-----------------------------+
+	 * || bool   *cb_isnull[nattrs]   |
+	 * || void   *cb_values[nattrs]   |
+	 * || FormData_pg_attribute       |
+	 * ||         cb_attrs[nargs]     |
+	 * || <---- (char *)chunk->data + dma_send_start ---+
+	 * || kern_args_t  kargs          |                 |
+	 * ||        :                    |                 |
+	 * || Fields to be sent to the    |                 |
+	 * || device as input of kernel   |                 |
+	 * || execution                   |                 |
+	 * ||        :                    |                 |
+	 * || <-- (char *)chunk->data + dma_recv_start --+  |
+	 * || bool  cb_rowmap[nitems]     |              |  |
+	 * || <------------------------------------------|--+
+	 * ||        :                    |              |
+	 * || Fields to be received from  |              |
+	 * || the device as output of     |              |
+	 * || kernel execution            |              |
+	 * ||        :                    |              |
+	 * ++-----------------------------+ <------------+
 	 */
 	memset(chunk->cb_isnull, 0, sizeof(bool *) * tupdesc->natts);
 	memset(chunk->cb_values, 0, sizeof(void *) * tupdesc->natts);
-	memset(chunk->offset_isnull, 0, sizeof(uint32) * nfields);
-	memset(chunk->offset_values, 0, sizeof(uint32) * nfields);
 
-	/*
-	 * XXX - code to assign result buffer should be here
-	 */
-	Assert(list_length(sestate->result_cols) == 0);
-	chunk->offset_args = offset;
-	chunk->cb_rowmap = ((char *)chunk->data) + offset;
-	offset += MAXALIGN(sizeof(bool) * nitems);
-	chunk->length_results = offset - chunk->offset_results;
+	chunk->dma_send_start = ((char *)kargs) - chunk->data;
+	offset = ((char *)&kargs->offset[kargs->nargs]) - chunk->data;
 
+	index = 0;
 	foreach (cell, sestate->kernel_cols)
 	{
 		Form_pg_attribute attr;
-		AttrNumber j = lfirst_int(cell);
+        AttrNumber j = lfirst_int(cell);
 
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
 		if (!attr->attnotnull)
 		{
-			chunk->offset_isnull[aindex] = offset - chunk->offset_args;
-			chunk->cb_isnull[j] = (bool *)(((char *)chunk->data) + offset);
-			offset += MAXALIGN(sizeof(bool) * nitems);
+			kargs->offset[index].isnull = offset;
+			chunk->cb_isnull[j] = (bool *)(chunk->data + offset);
+			offset += sizeof(bool) * nitems;
 		}
-
-		chunk->offset_values[aindex] = offset - chunk->offset_args;
-		chunk->cb_values[j] = (void *)(((char *)chunk->data) + offset);
+		kargs->offset[index].values = offset;
+		chunk->cb_values[j] = (void *)(chunk->data + offset);
 		if (attr->attlen > 0)
-			offset += MAXALIGN(attr->attlen * nitems);
+			offset += attr->attlen * nitems;
 		else
-			offset += MAXALIGN(sizeof(uint32) * nitems);
-	}
-	chunk->length_args = offset - chunk->offset_args;
+			offset += sizeof(uint32) * nitems;
 
+		index++;
+	}
+	chunk->dma_recv_start = offset;
+	Assert(kargs->i_rowmap == index);
+
+	kargs->offset[index].isnull = 0;
+	kargs->offset[index].values = offset;
+	chunk->cb_rowmap = (bool *)(chunk->data + offset);
+	offset += sizeof(bool) * nitems;
+	chunk->dma_send_end = offset;
+	index++;
+	/*
+	 * XXX - result buffer shall be assigned here
+	 */
+	chunk->dma_recv_end = offset;
+	Assert(kargs->nargs == index);
+
+	kargs->nargs = index;
+	kargs->nitems = nitems;
+	
+
+
+
+	/* misc fields refresh */
+	chunk->is_loaded = false;
+	chunk->is_running = false;
+	chunk->nvarlena = 0;
 	chunk->rowid = rowid;
 	chunk->nitems = nitems;
 	chunk->error_code = 0;
@@ -329,28 +375,32 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 {
 	ChunkBuffer	   *chunk;
 	TupleDesc		tupdesc = RelationGetDescr(sestate->frel);
-	int				nargs = list_length(sestate->kernel_cols);
-	int				nresults = list_length(sestate->result_cols);
-	int				nfields = nresults + nargs;
-	int				aindex;
-	size_t			offset;
+	int				nsend = list_length(sestate->kernel_cols);
+	int				nrecv = list_length(sestate->result_cols);
+	int				nargs = nsend + 1 + nrecv;
+	int				index;
 	size_t			length;
+	size_t			offset;
 	ListCell	   *cell;
+	Form_pg_attribute attr;
+	static FormData_pg_attribute rowmap_attr = {
+		0, {"rowid"}, BOOLOID, 0, sizeof(bool), 0,
+		InvalidAttrNumber, 0, -1, -1,
+		true, 'p', 'c', true, false, false, true, 0
+	};
 
-	length = offsetof(ChunkBuffer, data);
-	length += MAXALIGN((sizeof(Oid) +
-						sizeof(FormData_pg_attribute) * nfields +
-						sizeof(uint32) * nfields +
-						sizeof(uint32) * nfields +
-						sizeof(bool *) * tupdesc->natts +
-						sizeof(void *) * tupdesc->natts));
+	length = offsetof(ChunkBuffer, data)
+		+ MAXALIGN(sizeof(bool *) * tupdesc->natts)
+		+ MAXALIGN(sizeof(void *) * tupdesc->natts)
+		+ MAXALIGN(sizeof(FormData_pg_attribute) * nargs)
+		+ MAXALIGN(offsetof(kern_args_t, offset[nargs]));
 	/*
-	 * XXX - Right now, interface of PostgreSQL does not support to off-load
-	 * calculation results into external computing resources. Once it gets
-	 * supported, we also allocate region to back the calculation results
-	 * from OpenCL calculation server.
+	 * XXX - Right now, interface of PostgreSQL does not support to
+	 * offload calculation results into external computing resources.
+	 * Once it gets supported, we also allocate region to back the
+	 * calculation results from OpenCL calculation server.
 	 */
-	Assert(nresults == 0);
+	Assert(nrecv == 0);
 
 	/* For rowid map */
 	length += MAXALIGN(sizeof(bool) * PGSTROM_CHUNK_SIZE);
@@ -358,7 +408,6 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	/* For kernel arguments */
 	foreach (cell, sestate->kernel_cols)
 	{
-		Form_pg_attribute attr;
 		AttrNumber	j = lfirst_int(cell) - 1;
 
 		Assert(j >= 0 && j < tupdesc->natts);
@@ -385,101 +434,99 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	 * NULL shall be set on recvq and kernel_params. False shall be set
 	 * on is_loaded and is_running.
 	 */
-	chunk->nargs = nargs;
-	chunk->nresults = nresults;
-	chunk->nvarlena = 0;
 	chunk->cb_databaseid = MyDatabaseId;
+	chunk->cb_nattrs = tupdesc->natts;
 	chunk->error_code = 0;
 	chunk->rs_cache = NULL;
 	chunk->rs_memcxt = NULL;
+	ItemPointerSetInvalid(&chunk->cs_ctid);
 
 	/*
 	 * variable length field
 	 */
 	offset = 0;
-	chunk->cb_isnull = (bool **)(((char *)chunk->data) + offset);
+	chunk->cb_isnull = (bool **)(chunk->data + offset);
 	offset += MAXALIGN(sizeof(bool *) * tupdesc->natts);
-	chunk->cb_values = (void **)(((char *)chunk->data) + offset);
+	chunk->cb_values = (void **)(chunk->data + offset);
 	offset += MAXALIGN(sizeof(void *) * tupdesc->natts);
-	chunk->cb_attrs = (Form_pg_attribute)(((char *)chunk->data) + offset);
-	offset += MAXALIGN(sizeof(ATTRIBUTE_FIXED_PART_SIZE) * nfields);
-	chunk->offset_isnull = (uint32 *)(((char *)chunk->data) + offset);
-	offset += MAXALIGN(sizeof(uint32) * nfields);
-	chunk->offset_values = (uint32 *)(((char *)chunk->data) + offset);
-	offset += MAXALIGN(sizeof(uint32) * nfields);
-	chunk->offset_results = offset;
-	chunk->offset_args = 0;		/* to be set on refresh */
-
+	chunk->cb_attrs = (Form_pg_attribute)(chunk->data + offset);
+	offset += MAXALIGN(sizeof(ATTRIBUTE_FIXED_PART_SIZE) * nargs);
+	chunk->cb_kargs = (kern_args_t *)(chunk->data + offset);
+	offset += TYPEALIGN(PGSTROM_ALIGN_SIZE,
+						offsetof(kern_args_t, offset[nargs]));
 	/*
 	 * Copy of FormData_pg_attribute, because it is never changed during
 	 * a particular foreign table scan.
-	 *
-	 * XXX - needs to add code when result_cols gets supported
 	 */
-	aindex = 0;
+	index = 0;
 	foreach (cell, sestate->kernel_cols)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[lfirst_int(cell) - 1];
+		attr = tupdesc->attrs[lfirst_int(cell) - 1];
 
-		memcpy(&chunk->cb_attrs[aindex], attr, ATTRIBUTE_FIXED_PART_SIZE);
-		aindex++;
+		memcpy(&chunk->cb_attrs[index++], attr, ATTRIBUTE_FIXED_PART_SIZE);
 	}
-	Assert(aindex == nfields);
+	Assert(index == nsend);
+
+	memcpy(&chunk->cb_attrs[index++], &rowmap_attr, ATTRIBUTE_FIXED_PART_SIZE);
+	/*
+	 * XXX - put here for attribute of result (pseudo) columns
+	 */
+	Assert(index == nargs);
+
+	chunk->cb_kargs = (kern_args_t *)(chunk->cb_attrs + nargs);
+	chunk->cb_kargs->nargs = nargs;
+	chunk->cb_kargs->nitems = -1;		/* to be set later */
+	chunk->cb_kargs->i_rowmap = nsend;	/* right now, always 0 */
 
 	return chunk;
 }
 
 static void
-pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
+fetch_planners_info(Relation frel,
+					List *fdw_private,
+					text **p_kernel_source,
+					bytea **p_kernel_md5,
+					char **p_kernel_quals,
+					List **p_kernel_params,
+					List **p_kernel_cols,
+					List **p_varlena_cols,
+					List **p_host_cols,
+					bool *p_needs_ctid,
+					cl_device_type *p_kernel_devtype,
+					char **p_vector_preference,
+					size_t *p_vlbuf_size,
+					LOCKMODE *p_lockmode,
+					bool *p_lockmode_nowait)
 {
-	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
-	Relation		frel = fss->ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	text		   *kernel_source = NULL;
 	bytea		   *kernel_md5 = NULL;
-	text		   *kernel_quals = NULL;
+	char		   *kernel_quals = NULL;
 	List		   *kernel_params = NIL;
 	List		   *kernel_cols = NIL;
 	List		   *varlena_cols = NIL;
 	List		   *host_cols = NIL;
-	List		   *union_cols = NIL;
-	uint32			vlbuf_size = 65536;	/* 64MB */
+	bool			needs_ctid = false;
+	cl_device_type	kernel_devtype = CL_DEVICE_TYPE_ALL;
+	char		   *vector_preference = "int";
+	size_t			vlbuf_size = 65536;	/* 64MB */
 	LOCKMODE		lockmode = AccessShareLock;
 	bool			lockmode_nowait = false;
-	bool			needs_ctid = false;
-	bool			parallel_load = false;
-	StromExecState *sestate;
-	ChunkBuffer	   *chunk;
-	int				nattrs;
 	ListCell	   *cell;
-
-	/* Do nothing for EXPLAIN or ANALYZE case */
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
 
 	/*
 	 * Fetch planner's information
 	 */
-	foreach (cell, fscan->fdw_private)
+	foreach (cell, fdw_private)
 	{
 		DefElem	   *defel = (DefElem *) lfirst(cell);
-		Datum		temp;
 
 		if (strcmp(defel->defname, "kernel_source") == 0)
-		{
-			temp = ((Const *)defel->arg)->constvalue;
-			kernel_source = DatumGetTextP(temp);
-		}
+			kernel_source = DatumGetTextP(((Const *)defel->arg)->constvalue);
 		else if (strcmp(defel->defname, "kernel_md5") == 0)
-		{
-			temp = ((Const *)defel->arg)->constvalue;
-			kernel_md5 = DatumGetByteaP(temp);
-		}
+			kernel_md5 = DatumGetByteaP(((Const *)defel->arg)->constvalue);
 		else if (strcmp(defel->defname, "kernel_quals") == 0)
-		{
-			temp = ((Const *)defel->arg)->constvalue;
-			kernel_quals = DatumGetTextP(temp);
-		}
+			kernel_quals = strVal(defel->arg);
 		else if (strcmp(defel->defname, "kernel_params") == 0)
 			kernel_params = lappend(kernel_params, defel->arg);
 		else if (strcmp(defel->defname, "kernel_cols") == 0)
@@ -488,8 +535,7 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 			AttrNumber	attnum = intVal(defel->arg);
 
 			if (attnum < 1 || attnum > tupdesc->natts)
-				elog(ERROR, "columns referenced by kernel out of range: %d",
-					 attnum);
+				elog(ERROR, "kernel column out of range: %d", attnum);
 			attr = tupdesc->attrs[attnum - 1];
 			Assert(!attr->attisdropped);
 			kernel_cols = lappend_int(kernel_cols, attr->attnum);
@@ -501,13 +547,16 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 			AttrNumber	attnum = intVal(defel->arg);
 
 			if (attnum > tupdesc->natts)
-				elog(ERROR, "columns referenced by host out of range: %d",
-					 attnum);
+				elog(ERROR, "host column out of range: %d", attnum);
 			if (attnum > 0)
 				host_cols = lappend_int(host_cols, attnum);
 			else if (attnum == SelfItemPointerAttributeNumber)
 				needs_ctid = true;
 		}
+		else if (strcmp(defel->defname, "kernel_devtype") == 0)
+			kernel_devtype = intVal(defel->arg);
+		else if (strcmp(defel->defname, "vector_preference") == 0)
+			vector_preference = strVal(defel->arg);
 		else if (strcmp(defel->defname, "vlbuf_size") == 0)
 			vlbuf_size = intVal(defel->arg);
 		else if (strcmp(defel->defname, "lockmode") == 0)
@@ -527,42 +576,100 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 			elog(ERROR, "PG-Strom: unsupported planner option: %s",
 				 defel->defname);
 	}
+	/* write back to the caller */
+	if (p_kernel_source)
+		*p_kernel_source = kernel_source;
+	if (p_kernel_md5)
+		*p_kernel_md5 = kernel_md5;
+	if (p_kernel_quals)
+		*p_kernel_quals = kernel_quals;
+	if (p_kernel_params)
+		*p_kernel_params = kernel_params;
+	if (p_kernel_cols)
+		*p_kernel_cols = kernel_cols;
+	if (p_varlena_cols)
+		*p_varlena_cols = varlena_cols;
+	if (p_host_cols)
+		*p_host_cols = host_cols;
+	if (p_needs_ctid)
+		*p_needs_ctid = needs_ctid;
+	if (p_kernel_devtype)
+		*p_kernel_devtype = kernel_devtype;
+	if (p_vector_preference)
+		*p_vector_preference = vector_preference;
+	if (p_vlbuf_size)
+		*p_vlbuf_size = vlbuf_size;
+	if (p_lockmode)
+		*p_lockmode = lockmode;
+	if (p_lockmode_nowait)
+		*p_lockmode_nowait = lockmode_nowait;
+}
+
+static void
+pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
+{
+	ForeignScan	   *fscan = (ForeignScan *) fss->ss.ps.plan;
+	Relation		frel = fss->ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	text		   *kernel_source;
+	bytea		   *kernel_md5;
+	List		   *kernel_params;
+	cl_device_type	kernel_devtype;
+	char		   *vector_preference;
+	List		   *union_cols;
+	StromExecState *sestate;
+	ChunkBuffer	   *chunk;
+	int				nattrs;
+	ListCell	   *cell;
+
+	/* Do nothing for EXPLAIN or ANALYZE case */
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+		return;
+
+	sestate = palloc0(sizeof(StromExecState));
 
 	/*
 	 * Construction of StromExecState
 	 */
 	sestate = palloc0(sizeof(StromExecState));
+	fetch_planners_info(frel, fscan->fdw_private,
+						&kernel_source,
+						&kernel_md5,
+						NULL,
+						&kernel_params,
+						&sestate->kernel_cols,
+						&sestate->varlena_cols,
+						&sestate->host_cols,
+						&sestate->needs_ctid,
+						&kernel_devtype,
+						&vector_preference,
+						&sestate->vlbuf_size,
+						&sestate->lockmode,
+						&sestate->lockmode_nowait);
+
 	sestate->estate = fss->ss.ps.state;
 	sestate->snapshot = sestate->estate->es_snapshot;
 	sestate->recvq = pgstrom_queue_alloc(true);
 	sestate->kernel_params = extract_kernel_params(sestate->estate,
 												   kernel_source,
 												   kernel_md5,
-												   kernel_params);
+												   kernel_params,
+												   kernel_devtype,
+												   vector_preference);
 	dlist_init(&sestate->chunk_ready_list);
 	dlist_init(&sestate->chunk_free_list);
 	sestate->num_total_chunks = 0;
 	sestate->num_running_chunks = 0;
 
-	sestate->kernel_quals = kernel_quals;
-	sestate->kernel_cols = kernel_cols;
-	sestate->result_cols = NIL;
-	sestate->varlena_cols = varlena_cols;
-	sestate->host_cols = host_cols;
-	sestate->vlbuf_size = vlbuf_size;
-	sestate->lockmode = lockmode;
-	sestate->lockmode_nowait = lockmode_nowait;
-	sestate->needs_ctid = needs_ctid;
-	sestate->parallel_load = parallel_load;
-
 	/* Open the shadow relations */
 	nattrs = tupdesc->natts;
 	sestate->frel = frel;
-	sestate->rmap_rel = pgstrom_open_shadow_rmap(frel, lockmode);
-	sestate->rmap_idx = pgstrom_open_shadow_rmap_index(frel, lockmode);
+	sestate->rmap_rel = pgstrom_open_shadow_rmap(frel, sestate->lockmode);
+	sestate->rmap_idx
+		= pgstrom_open_shadow_rmap_index(frel, sestate->lockmode);
 	sestate->cs_rel = pgstrom_open_shadow_cstore(frel, AccessShareLock);
 	sestate->cs_idx = pgstrom_open_shadow_cstore_index(frel, AccessShareLock);
-	sestate->rs_rel = pgstrom_open_shadow_rstore(frel, lockmode);
+	sestate->rs_rel = pgstrom_open_shadow_rstore(frel, sestate->lockmode);
 	sestate->cs_scan = palloc0(sizeof(IndexScanDesc) * nattrs);
 
 	/* Construction of column-store scan window */
@@ -579,7 +686,8 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 										sestate->snapshot, 0, NULL);
 	sestate->rs_scan = heap_beginscan(sestate->rs_rel,
 									  sestate->snapshot, 0, NULL);
-	union_cols = list_concat_unique_int(kernel_cols, host_cols);
+	union_cols = list_concat_unique_int(sestate->kernel_cols,
+										sestate->host_cols);
 	foreach (cell, union_cols)
 	{
 		AttrNumber	j = lfirst_int(cell) - 1;
@@ -1748,40 +1856,47 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 							 struct ExplainState *es)
 {
 	ForeignScan	   *fscan = (ForeignScan *)fss->ss.ps.plan;
-	TupleDesc		tupdesc = RelationGetDescr(fss->ss.ss_currentRelation);
-	text		   *kernel_source = NULL;
-	text		   *kernel_md5 = NULL;
-	text		   *kernel_quals = NULL;
-	List		   *kernel_params = NIL;
-	List		   *kernel_cols = NIL;
-	List		   *host_cols = NIL;
-	ListCell	   *cell;
-	StringInfoData	buf;
+	Relation		frel = fss->ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(frel);
+	text		   *kernel_source;
+	bytea		   *kernel_md5;
+	char		   *kernel_quals;
+	List		   *kernel_params;
+	List		   *kernel_cols;
+	List		   *host_cols;
+	bool			needs_ctid;
+	cl_device_type	kernel_devtype;
+	char		   *vector_preference;
 	Form_pg_attribute attr;
+	StringInfoData	buf;
+	ListCell	   *cell;
 
 	/*
      * Fetch planner's information
      */
-	foreach (cell, fscan->fdw_private)
-	{
-		DefElem	   *defel = (DefElem *) lfirst(cell);
-
-		if (strcmp(defel->defname, "kernel_source") == 0)
-			kernel_source = DatumGetTextP(((Const *)defel->arg)->constvalue);
-		else if (strcmp(defel->defname, "kernel_md5") == 0)
-			kernel_md5 = DatumGetByteaP(((Const *)defel->arg)->constvalue);
-		else if (strcmp(defel->defname, "kernel_quals") == 0)
-			kernel_quals = DatumGetTextP(((Const *)defel->arg)->constvalue);
-		else if (strcmp(defel->defname, "kernel_params") == 0)
-			kernel_params = lappend(kernel_params, defel->arg);
-		else if (strcmp(defel->defname, "kernel_cols") == 0)
-			kernel_cols = lappend_int(kernel_cols, intVal(defel->arg));
-		else if (strcmp(defel->defname, "host_cols") == 0)
-			host_cols = lappend_int(host_cols, intVal(defel->arg));
-	}
+	fetch_planners_info(frel, fscan->fdw_private,
+                        &kernel_source,
+                        &kernel_md5,
+						&kernel_quals,
+                        &kernel_params,
+                        &kernel_cols,
+                        NULL,	/* varlena_cols */
+                        &host_cols,
+                        &needs_ctid,
+                        &kernel_devtype,
+                        &vector_preference,
+                        NULL,	/* vlbuf_size */
+                        NULL,	/* lockmode */
+                        NULL);	/* lockmode_nowait */
 
 	/* Dump host columns */
 	initStringInfo(&buf);
+	if (needs_ctid)
+	{
+		attr = SystemAttributeDefinition(SelfItemPointerAttributeNumber, true);
+		appendStringInfo(&buf, "%s", NameStr(attr->attname));
+	}
+
 	foreach (cell, host_cols)
 	{
 		AttrNumber	attnum = lfirst_int(cell);
@@ -1814,51 +1929,62 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	}
 	ExplainPropertyText("kernel columns", buf.data, es);
 
-	/* Dump qualifier of this scan */
-	if (!es->verbose)
+	if (kernel_source)
 	{
-		if (kernel_quals)
+		/* dump kernel quals (not verbose) */
+		if (!es->verbose)
+			ExplainPropertyText("kernel quals", kernel_quals, es);
+
+		/* dump kernel device */
+		resetStringInfo(&buf);
+		if (kernel_devtype & CL_DEVICE_TYPE_CPU)
+			appendStringInfo(&buf, "%s%s",
+							 buf.len > 0 ? ", " : "", "CPU");
+		if (kernel_devtype & CL_DEVICE_TYPE_GPU)
+			appendStringInfo(&buf, "%s%s",
+							 buf.len > 0 ? ", " : "", "GPU");
+		if (kernel_devtype & CL_DEVICE_TYPE_ACCELERATOR)
+			appendStringInfo(&buf, "%s%s",
+							 buf.len > 0 ? ", " : "", "Accelerator");
+		ExplainPropertyText("kernel device", buf.data, es);
+
+		if (es->verbose)
 		{
-			char   *qual_cstring = text_to_cstring(kernel_quals);
-			ExplainPropertyText("kernel quals", qual_cstring, es);
-		}
-	}
-	else if (kernel_source)
-	{
-		static const char *hex = "0123456789abcdef";
-		char	strbuf[2 * MD5_SIZE + 1];
-		char   *source = text_to_cstring(kernel_source);
-		char   *head;
-		char   *pos;
-		int		lineno = 1;
-		int		c, i, j;
+			static const char *hex = "0123456789abcdef";
+			char	strbuf[2 * MD5_SIZE + 1];
+			char   *source = text_to_cstring(kernel_source);
+			char   *head;
+			char   *pos;
+			int		lineno = 1;
+			int		c, i, j;
 
-		/* transform kernel_md5 to human readable form */
-		Assert(kernel_md5 != NULL);
-		head = VARDATA(kernel_md5);
-		for (i=0, j=0; i < MD5_SIZE; i++)
-		{
-			strbuf[j++] = hex[(head[i] >> 4) & 0x0f];
-			strbuf[j++] = hex[ head[i]       & 0x0f];
-		}
-		strbuf[j++] = '\0';
-
-		ExplainPropertyText("kernel md5", strbuf, es);
-
-		/* output kernel source per line */
-		head = pos = source;
-		while (true)
-		{
-			c = *pos++;
-
-			if (c == '\n' || c == '\0')
+			/* dump kernel_md5 in human readable form */
+			Assert(kernel_md5 != NULL);
+			head = VARDATA(kernel_md5);
+			for (i=0, j=0; i < MD5_SIZE; i++)
 			{
-				snprintf(strbuf, sizeof(strbuf), "% 4d", lineno++);
-				pos[-1] = '\0';
-				ExplainPropertyText(strbuf, head, es);
-				if (c == '\0')
-					break;
-				head = pos;
+				strbuf[j++] = hex[(head[i] >> 4) & 0x0f];
+				strbuf[j++] = hex[ head[i]       & 0x0f];
+			}
+			strbuf[j++] = '\0';
+
+			ExplainPropertyText("kernel md5", strbuf, es);
+
+			/* output kernel source per line */
+			head = pos = source;
+			while (true)
+			{
+				c = *pos++;
+
+				if (c == '\n' || c == '\0')
+				{
+					snprintf(strbuf, sizeof(strbuf), "% 4d", lineno++);
+					pos[-1] = '\0';
+					ExplainPropertyText(strbuf, head, es);
+					if (c == '\0')
+						break;
+					head = pos;
+				}
 			}
 		}
 	}

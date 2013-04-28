@@ -260,11 +260,10 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 		char	   *kernel_md5;
 		List	   *kernel_params = NIL;
 		List	   *kernel_cols = NIL;
+		cl_device_type allowed_devtype;
+		char	   *vector_preference;
 		List	   *dpcxt;
 		char	   *dpsrc;
-		text	   *dptxt;
-		HeapTuple	tuple;
-		Form_pg_class relform;
 
 		/* generate kernel source */
 		if (list_length(kernel_quals) == 1)
@@ -273,7 +272,9 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 			kernel_expr = (Node *)makeBoolExpr(AND_EXPR, kernel_quals, -1);
 
 		kernel_source = pgstrom_codegen_qual(root, baserel, kernel_expr,
-											 &kernel_params, &kernel_cols);
+											 &kernel_params, &kernel_cols,
+											 &allowed_devtype,
+											 &vector_preference);
 		defel = makeDefElem("kernel_source",
 							(Node *)makeConst(TEXTOID,
 											  -1,
@@ -324,26 +325,21 @@ pgstrom_get_foreign_plan(PlannerInfo *root,
 		}
 
 		/* human readable representation for EXPLAIN */
-		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(foreigntableid));
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "cache lookup failed for relation %u", foreigntableid);
-		relform = (Form_pg_class) GETSTRUCT(tuple);
-
-		dpcxt = deparse_context_for(NameStr(relform->relname),
+		dpcxt = deparse_context_for(get_rel_name(foreigntableid),
 									foreigntableid);
 		dpsrc = deparse_expression(kernel_expr, dpcxt, false, false);
-		dptxt = cstring_to_text(dpsrc);
 		defel = makeDefElem("kernel_quals",
-							(Node *)makeConst(TEXTOID,
-											  -1,
-											  InvalidOid,
-											  VARSIZE(dptxt),
-											  PointerGetDatum(dptxt),
-											  false,
-											  false));
+							(Node *)makeString(dpsrc));
 		fdw_private = lappend(fdw_private, defel);
 
-		ReleaseSysCache(tuple);
+		/* planner hint information */
+		defel = makeDefElem("kernel_devtype",
+							(Node *)makeInteger(allowed_devtype));
+		fdw_private = lappend(fdw_private, defel);
+
+		defel = makeDefElem("vector_preference",
+							(Node *)makeString(vector_preference));
+		fdw_private = lappend(fdw_private, defel);
 	}
 	/* save the column numbers referenced by host */
 	pull_varattnos((Node *)host_quals, baserel->relid, &host_cols);
