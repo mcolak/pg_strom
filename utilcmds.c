@@ -675,10 +675,10 @@ pgstrom_post_alter_relation(Relation frel, AlterTableStmt *stmt,
 
 		standard_ProcessUtility((Node *)rs_stmt,
 								queryString,
+								PROCESS_UTILITY_SUBCOMMAND,
 								params,
 								None_Receiver,
-								NULL,
-								PROCESS_UTILITY_GENERATED);
+								NULL);
 	}
 }
 
@@ -690,20 +690,20 @@ pgstrom_post_alter_relation(Relation frel, AlterTableStmt *stmt,
 static void
 pgstrom_cstore_utilcmds(Node *parsetree,
 						const char *queryString,
+						ProcessUtilityContext context,
 						ParamListInfo params,
 						DestReceiver *dest,
-						char *completionTag,
-						ProcessUtilityContext context)
+						char *completionTag)
 {
 	/*
 	 * Call the original ProcessUtility
 	 */
 	if (next_process_utility_hook)
-		(*next_process_utility_hook)(parsetree, queryString, params,
-									 dest, completionTag, context);
+		(*next_process_utility_hook)(parsetree, queryString, context,
+									 params, dest, completionTag);
 	else
-		standard_ProcessUtility(parsetree, queryString, params,
-								dest, completionTag, context);
+		standard_ProcessUtility(parsetree, queryString, context,
+								params, dest, completionTag);
 
 	/*
 	 * Post ProcessUtility stuff

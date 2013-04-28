@@ -14,6 +14,7 @@
 #include "postgres.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -329,23 +330,28 @@ pgstrom_shmem_cleanup(ResourceReleasePhase phase,
 		if (block->magic == SHMEM_BLOCK_CHUNK_BUFFER)
 		{
 			ChunkBuffer *chunk = (ChunkBuffer *)block->data;
+			StromQueue	*recvq = chunk->recvq;
 
-			/*
-			 * Wait for completion of kernel-execution on this chunk
-			 */
-		retry:
-			pgstrom_cond_wait(&chunk->cond, &chunk->lock, 30*1000);
-			if (chunk->is_running)
+			if (recvq != NULL)
 			{
-				pthread_mutex_unlock(&chunk->lock);
-				elog(LOG, "waiting for completion of kernel execution...");
-				goto retry;
-			}
-			pthread_mutex_unlock(&chunk->lock);
+				pthread_mutex_lock(&recvq->lock);
+				while (chunk->is_running)
+				{
+					pthread_mutex_unlock(&recvq->lock);
 
+					if (!pgstrom_cond_wait(&recvq->cond, &recvq->lock,
+										   10*1000))
+					{
+						elog(LOG, "waiting for kernel execution chunk=%p",
+							 chunk);
+						pthread_mutex_lock(&recvq->lock);
+					}
+				}
+				pthread_mutex_unlock(&recvq->lock);
+			}
 			/*
-			 * Note: relevant varlena-buffers are also released
-			 * at pgstrom_chunk_buffer_free()
+			 * NOTE: relevant varlena-buffers are also released on
+			 * pgstrom_chunk_buffer_free()
 			 */
 			pgstrom_chunk_buffer_free(chunk);
 		}
@@ -414,8 +420,19 @@ pgstrom_queue_alloc(bool abort_on_error)
 	}
 	queue->is_shutdown = false;
 
-	/* add this block into private tracker */
-	dlist_push_tail(&shmem_private_track, &block->free_list);
+	/*
+	 * Add this block into private tracker only when this context is
+	 * under postmaster (regular backend process in other words),
+	 * because OpenCL calculation server also set up a strom queue
+	 * on the system startup time, then postmaster process forks its
+	 * backend processes with copy of private memory area.
+	 *
+	 * Strom queues acquired during system start up will be never
+	 * released, so no need to register on private tracking list.
+	 * It hits unexpected assertion on resource cleanup hook.
+	 */
+	if (IsUnderPostmaster)
+		dlist_push_tail(&shmem_private_track, &block->free_list);
 
 	return queue;
 }
@@ -549,6 +566,7 @@ pgstrom_kernel_params_alloc(Size total_length, bool abort_on_error)
 		return NULL;
 	}
 	/* add this block into private tracker */
+	Assert(IsUnderPostmaster);
 	dlist_push_tail(&shmem_private_track, &block->free_list);
 
 	return (KernelParams *)block->data;
@@ -636,18 +654,10 @@ pgstrom_chunk_buffer_alloc(Size total_length, bool abort_on_error)
 					 errhint("enlarge pg_strom.shmem_size")));
 		return NULL;
 	}
-
 	chunk = (ChunkBuffer *)block->data;
-	if (!pgstrom_cond_init(&chunk->cond, &chunk->lock))
-	{
-		pgstrom_shmem_free(block);
-		if (abort_on_error)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed to init mutex object")));
-		return NULL;
-	}
+
 	/* add this block into private tracker */
+	Assert(IsUnderPostmaster);
 	dlist_push_tail(&shmem_private_track, &block->free_list);
 
 	/*
@@ -695,9 +705,35 @@ pgstrom_chunk_buffer_free(ChunkBuffer *chunk)
 	dlist_delete(&block->free_list);
 
 	/* release it */
-	pthread_mutex_destroy(&chunk->lock);
-	pthread_cond_destroy(&chunk->cond);
 	pgstrom_shmem_free(block);
+}
+
+/*
+ * pgstrom_chunk_buffer_return
+ *
+ * A special purpose function that returns supplied chunk-buffer
+ * to the caller backend via chunk->recvq. chunk->is_running must
+ * be turned off under mutex-lock of the recv queue, because error
+ * cleanup routine may wait for completion of kernel execution, so
+ * we ensure chunk->is_running is turned off under the appropriate
+ * lock.
+ */
+void
+pgstrom_chunk_buffer_return(ChunkBuffer *chunk, int error_code)
+{
+	StromQueue *queue = chunk->recvq;
+
+	Assert(chunk->is_running);
+
+	pthread_mutex_lock(&queue->lock);
+	Assert(!queue->is_shutdown);
+
+	chunk->error_code = error_code;
+	chunk->is_running = false;
+	dlist_push_tail(&queue->head, &chunk->chain);
+
+	pthread_cond_signal(&queue->cond);
+    pthread_mutex_unlock(&queue->lock);
 }
 
 /*

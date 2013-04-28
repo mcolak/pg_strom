@@ -1080,6 +1080,7 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 								   sizeof(clTypeInfo *) * func_argtypes->dim1);
 	finfo->hash = hash;
 	finfo->func_name = MemoryContextStrdup(CacheMemoryContext, func_name);
+	finfo->func_namespace = func_namespace;
 	finfo->func_usecnt_int = 1;	/* give small advantage on int-vector */
 	finfo->func_nargs = func_argtypes->dim1;
 	finfo->func_argtypes_oid = (Oid *)(finfo->func_argtypes +
@@ -1097,6 +1098,7 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 		if (!finfo->func_argtypes[k])
 			elog(ERROR, "failed to lookup clTypeInfo of %s",
 				 format_type_be(func_argtypes->values[k]));
+		finfo->func_argtypes_oid[k] = finfo->func_argtypes[k]->type_oid;
 	}
 	if (func_namespace != PG_CATALOG_NAMESPACE)
 		goto skip;

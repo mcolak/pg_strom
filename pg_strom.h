@@ -23,10 +23,6 @@
 #include <CL/cl_ext.h>
 #include "opencl_common.h"
 
-/* debug messages */
-#define dlog(fmt,...)							\
-	elog(DEBUG1, "%s:%d " fmd, __FUNCTION__, __LINE__, __VA_ARGS__)
-
 /* container macro */
 #define container_of(type, field, ptr)			\
 	((type *)((char *)(ptr) - offsetof(type, field)))
@@ -116,8 +112,6 @@ typedef struct {
 
 typedef struct {
 	dlist_node		chain;
-	pthread_mutex_t	lock;
-	pthread_cond_t	cond;
 	StromQueue	   *recvq;
 
 	KernelParams   *kernel_params;
@@ -333,6 +327,7 @@ extern void pgstrom_kernel_params_free(KernelParams *kernel_params);
 extern ChunkBuffer *pgstrom_chunk_buffer_alloc(Size total_length,
 											   bool abort_on_error);
 extern void pgstrom_chunk_buffer_free(ChunkBuffer *chunk);
+extern void pgstrom_chunk_buffer_return(ChunkBuffer *chunk, int error_code);
 extern VarlenaBuffer *pgstrom_varlena_buffer_alloc(Size total_length,
 												   bool abort_on_error);
 extern void pgstrom_varlena_buffer_free(VarlenaBuffer *vlbuf);

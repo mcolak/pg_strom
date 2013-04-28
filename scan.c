@@ -210,7 +210,7 @@ extract_kernel_params(EState *estate,
 										 MAXALIGN(str.len), true);
 	memcpy(result->kernel_md5, VARDATA(kernel_md5), MD5_SIZE);
 	memcpy(&result->kernel_source,
-		   VARDATA(kernel_source),
+		   kernel_source,
 		   VARSIZE(kernel_source));
 	result->kparams = (kern_params_t *)(((char *)result) +
 										offsetof(KernelParams,
@@ -312,7 +312,7 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	foreach (cell, sestate->kernel_cols)
 	{
 		Form_pg_attribute attr;
-        AttrNumber j = lfirst_int(cell);
+        AttrNumber j = lfirst_int(cell) - 1;
 
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
@@ -413,6 +413,8 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
 
+		if (!attr->attnotnull)
+			length += MAXALIGN(sizeof(bool) * PGSTROM_CHUNK_SIZE);
 		if (attr->attlen > 0)
 			length += MAXALIGN(attr->attlen * PGSTROM_CHUNK_SIZE);
 		else
@@ -434,6 +436,9 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	 * NULL shall be set on recvq and kernel_params. False shall be set
 	 * on is_loaded and is_running.
 	 */
+	chunk->recvq = sestate->recvq;
+	chunk->kernel_params = sestate->kernel_params;
+	dlist_init(&chunk->vlbuf_list);
 	chunk->cb_databaseid = MyDatabaseId;
 	chunk->cb_nattrs = tupdesc->natts;
 	chunk->error_code = 0;
@@ -626,13 +631,12 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
-	sestate = palloc0(sizeof(StromExecState));
-
 	/*
 	 * Construction of StromExecState
 	 */
 	sestate = palloc0(sizeof(StromExecState));
-	fetch_planners_info(frel, fscan->fdw_private,
+	fetch_planners_info(frel,
+						fscan->fdw_private,
 						&kernel_source,
 						&kernel_md5,
 						NULL,
@@ -646,7 +650,6 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 						&sestate->vlbuf_size,
 						&sestate->lockmode,
 						&sestate->lockmode_nowait);
-
 	sestate->estate = fss->ss.ps.state;
 	sestate->snapshot = sestate->estate->es_snapshot;
 	sestate->recvq = pgstrom_queue_alloc(true);
@@ -686,8 +689,8 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 										sestate->snapshot, 0, NULL);
 	sestate->rs_scan = heap_beginscan(sestate->rs_rel,
 									  sestate->snapshot, 0, NULL);
-	union_cols = list_concat_unique_int(sestate->kernel_cols,
-										sestate->host_cols);
+	union_cols = list_concat_unique_int(list_copy(sestate->kernel_cols),
+										list_copy(sestate->host_cols));
 	foreach (cell, union_cols)
 	{
 		AttrNumber	j = lfirst_int(cell) - 1;
@@ -1115,6 +1118,7 @@ pgstrom_load_column_rowmap(StromExecState *sestate, ChunkBuffer *chunk)
 	 * varlena-buffer can be transfered to the OpenCL calculation device
 	 * at most.
 	 */
+	tupdesc = RelationGetDescr(sestate->frel);
 	foreach (cell, sestate->kernel_cols)
 	{
 		Form_pg_attribute attr
@@ -1614,9 +1618,11 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				VarlenaBuffer  *vlbuf
 					= dlist_container(VarlenaBuffer, chain, iter.cur);
 
+				dlist_delete(&vlbuf->chain);
 				pgstrom_varlena_buffer_free(vlbuf);
 			}
 			Assert(dlist_is_empty(&chunk->vlbuf_list));
+			chunk->nvarlena = 0;
 
 			dlist_push_tail(&sestate->chunk_free_list, &chunk->chain);
 		}
@@ -1687,10 +1693,12 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 									&chunk->chain);
 				else
 				{
-					// enqueue either calculation or io queue
-					// chunk->is_running = true;
-					// sestate->num_running_chunks++;
-					elog(ERROR, "kernel-execution - not implemented yet!");
+					Assert(!chunk->is_running);
+					Assert(chunk->is_loaded);
+					chunk->is_running = true;
+
+					clserv_enqueue_chunk(chunk);
+					sestate->num_running_chunks++;
 				}
 			}
 			else
@@ -1867,14 +1875,14 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 	bool			needs_ctid;
 	cl_device_type	kernel_devtype;
 	char		   *vector_preference;
-	Form_pg_attribute attr;
 	StringInfoData	buf;
 	ListCell	   *cell;
 
 	/*
      * Fetch planner's information
      */
-	fetch_planners_info(frel, fscan->fdw_private,
+	fetch_planners_info(frel,
+						fscan->fdw_private,
                         &kernel_source,
                         &kernel_md5,
 						&kernel_quals,
@@ -1889,51 +1897,25 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
                         NULL,	/* lockmode */
                         NULL);	/* lockmode_nowait */
 
-	/* Dump host columns */
-	initStringInfo(&buf);
-	if (needs_ctid)
-	{
-		attr = SystemAttributeDefinition(SelfItemPointerAttributeNumber, true);
-		appendStringInfo(&buf, "%s", NameStr(attr->attname));
-	}
-
-	foreach (cell, host_cols)
-	{
-		AttrNumber	attnum = lfirst_int(cell);
-
-		if (attnum > 0)
-			attr = tupdesc->attrs[attnum - 1];
-		else
-			attr = SystemAttributeDefinition(attnum, true);
-
-		appendStringInfo(&buf, "%s%s",
-						 buf.len > 0 ? ", " : "",
-						 NameStr(attr->attname));
-	}
-	ExplainPropertyText("host columns", buf.data, es);
-
 	/* Dump kernel columns */
-	resetStringInfo(&buf);
+	initStringInfo(&buf);
 	foreach (cell, kernel_cols)
 	{
 		AttrNumber	attnum = lfirst_int(cell);
-
-		if (attnum > 0)
-			attr = tupdesc->attrs[attnum - 1];
-		else
-			attr = SystemAttributeDefinition(attnum, true);
-
+		Form_pg_attribute attr = (attnum > 0 ?
+								  tupdesc->attrs[attnum - 1] :
+								  SystemAttributeDefinition(attnum, true));
 		appendStringInfo(&buf, "%s%s",
 						 buf.len > 0 ? ", " : "",
 						 NameStr(attr->attname));
 	}
-	ExplainPropertyText("kernel columns", buf.data, es);
+	ExplainPropertyText("Internal", buf.data, es);
 
 	if (kernel_source)
 	{
 		/* dump kernel quals (not verbose) */
 		if (!es->verbose)
-			ExplainPropertyText("kernel quals", kernel_quals, es);
+			ExplainPropertyText("Kernel quals", kernel_quals, es);
 
 		/* dump kernel device */
 		resetStringInfo(&buf);
@@ -1946,7 +1928,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 		if (kernel_devtype & CL_DEVICE_TYPE_ACCELERATOR)
 			appendStringInfo(&buf, "%s%s",
 							 buf.len > 0 ? ", " : "", "Accelerator");
-		ExplainPropertyText("kernel device", buf.data, es);
+		ExplainPropertyText("Device types", buf.data, es);
 
 		if (es->verbose)
 		{
@@ -1968,7 +1950,7 @@ pgstrom_explain_foreign_scan(ForeignScanState *fss,
 			}
 			strbuf[j++] = '\0';
 
-			ExplainPropertyText("kernel md5", strbuf, es);
+			ExplainPropertyText("Source md5", strbuf, es);
 
 			/* output kernel source per line */
 			head = pos = source;

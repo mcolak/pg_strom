@@ -21,7 +21,15 @@
 #include "storage/proc.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
-#include <unistd.h>
+
+/* DEBUG messages */
+#if 0
+#define dlog(fmt,...)											\
+	fprintf(stderr, "clserv(worker:%03lu, %s:%d) : " fmt "\n",	\
+			clserv_worker_index,  __FUNCTION__, __LINE__, ##__VA_ARGS__)
+#else
+#define dlog(fmt,...)
+#endif
 
 #define MAX_OPENCL_PLATFORMS	16
 #define MAX_OPENCL_DEVICES		64
@@ -100,8 +108,8 @@ typedef struct {
  * static declarations
  */
 static bool 		clserv_running = true;
+static __thread uintptr_t clserv_worker_index;
 static int			clserv_num_workers;
-static int			clserv_worker_stacksz;
 static openclDevice	*cldev_slot[MAX_OPENCL_DEVICES];
 static int			cldev_nums;
 static pthread_mutex_t clprog_lock[CLPROGRAM_SLOT_SIZE];
@@ -115,14 +123,12 @@ static const char  *opencl_strerror(cl_int errcode);
 	snprintf((chunk)->data, sizeof((chunk)->data), "%s:%d " fmt, \
 			 __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
-#define chunk_backq(chunk, result, fmt, ...)					\
+#define chunk_backq(chunk, error_code, fmt, ...)				\
 	do {														\
-		Assert((chunk)->is_running);							\
-		(chunk)->is_running = false;							\
-		(chunk)->error_code = (result);							\
-		if ((result) != ERRCODE_SUCCESSFUL_COMPLETION)			\
+		dlog("chunk(%p) " fmt, (chunk), ##__VA_ARGS__);			\
+		if ((error_code) != ERRCODE_SUCCESSFUL_COMPLETION)		\
 			chunk_elog(chunk, fmt, ##__VA_ARGS__);				\
-		pgstrom_queue_enqueue((chunk)->recvq, &(chunk)->chain);	\
+		pgstrom_chunk_buffer_return((chunk), (error_code));		\
 	} while(0)
 
 /*
@@ -135,15 +141,25 @@ static openclDevice *
 clserv_device_scheduler(ChunkBuffer *chunk)
 {
 	static volatile sig_atomic_t cldev_index = 0;
-	cl_device_type	kernel_devtype = chunk->kernel_params->kernel_devtype;
 	openclDevice   *cldev;
+	cl_device_type	kernel_devtype;
+	int				first;
 	int				index;
 
-	do {
-		index = __sync_fetch_and_add(&cldev_index, 1) % cldev_nums;
+	kernel_devtype = chunk->kernel_params->kernel_devtype;
+	index = first = __sync_fetch_and_add(&cldev_index, 1) % cldev_nums;
+	cldev = cldev_slot[index];
+	while ((cldev->prop.dev_type & kernel_devtype) == 0)
+	{
+		index = (index + 1) % cldev_nums;
+		if (index == first)
+		{
+			chunk_backq(chunk, ERRCODE_INTERNAL_ERROR,
+						"No OpenCL device available for this code");
+			return NULL;
+		}
 		cldev = cldev_slot[index];
-	} while ((cldev->prop.dev_type & kernel_devtype) != 0);
-
+	}
 	return cldev;
 }
 
@@ -172,6 +188,8 @@ clserv_cb_build_program(cl_program program, void *user_data)
 	dlist_mutable_iter iter;
 	int		rc, index;
 
+	dlog("build done for clprog=%p", clprog);
+
 	Assert(program == clprog->program);
 	index = clprog_slot_hash(clprog->clcxt, clprog->kernel_md5)
 		% lengthof(clprog_slot);
@@ -188,11 +206,12 @@ clserv_cb_build_program(cl_program program, void *user_data)
 
 		dlist_delete(&chunk->chain);
 		clserv_enqueue_chunk(chunk);
+		dlog("chunk %p was enqueued again", chunk);
 	}
 	pthread_mutex_unlock(&clprog_lock[index]);
+	dlog("all the chunks on waitq of clprog (%p) were enqueued again", clprog);
 }
 
-#define CLKERNEL_NOT_READY		((void *)(-1UL))
 static openclKernel *
 clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 {	  
@@ -213,6 +232,7 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	index = clprog_slot_hash(cldev->clcxt, kernel_md5)
 		% lengthof(clprog_slot);
 
+	dlog("start to construct kernel for chunk=%p", chunk);
 	if ((rc = pthread_mutex_lock(&clprog_lock[index])) != 0)
 	{
 		chunk_backq(chunk, ERRCODE_INTERNAL_ERROR,
@@ -294,45 +314,43 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 				}
 				return clkern;
 			}
-			else if (status == CL_BUILD_IN_PROGRESS)
+
+			if (status == CL_BUILD_IN_PROGRESS ||
+				status == CL_BUILD_NONE)
 			{
 				/*
 				 * In case when program is under asynchronous building
-				 * process, we push this chunk onto the waiting list
-				 * of this program. Heuristically, it does not make
-				 * sense to find another device, since it usually takes
-				 * asynchronous build also.
+				 * process, we link this chunk to the waiting list of
+				 * this program. Even if build process is not actually
+				 * launched yet, it is job of the worker thread that
+				 * construct openclProgram object.
 				 */
 				dlist_push_tail(&clprog->waitq, &chunk->chain);
 
 				pthread_mutex_unlock(&clprog_lock[index]);
 
-				return CLKERNEL_NOT_READY;
-			}
-			else
-			{
-				/*
-				 * Elsewhere, program compile was failed.
-				 */
-				pthread_mutex_unlock(&clprog_lock[index]);
-
-				if (clGetProgramBuildInfo(clprog->program,
-										  cldev->device_id,
-										  CL_PROGRAM_BUILD_LOG,
-										  sizeof(chunk->data) - 1,
-										  chunk->data,
-										  NULL) == CL_SUCCESS)
-					chunk->error_code = ERRCODE_SYNTAX_ERROR;
-				else
-				{
-					chunk->error_code = ERRCODE_INTERNAL_ERROR;
-					chunk_elog(chunk, "failed on clGetProgramBuildInfo (%s)",
-							   opencl_strerror(rc));
-				}
-				chunk->is_running = false;
-				pgstrom_queue_enqueue(chunk->recvq, &chunk->chain);
+				dlog("chunk %p was enqueued clprog=%p waitq", chunk, clprog);
 				return NULL;
 			}
+			/*
+			 * Elsewhere, program compile was failed.
+			 */
+			pthread_mutex_unlock(&clprog_lock[index]);
+			Assert(status == CL_BUILD_ERROR);
+
+			rc = clGetProgramBuildInfo(clprog->program,
+									   cldev->device_id,
+									   CL_PROGRAM_BUILD_LOG,
+									   sizeof(chunk->data) - 1,
+									   chunk->data,
+									   NULL);
+			if (rc == CL_SUCCESS)
+				pgstrom_chunk_buffer_return(chunk, ERRCODE_INTERNAL_ERROR);
+			else
+				chunk_backq(chunk, ERRCODE_INTERNAL_ERROR,
+							"failed on clGetProgramBuildInfo (%s)",
+							opencl_strerror(rc));
+			return NULL;
 		}
 	}
 
@@ -354,6 +372,7 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	source_str[1] = VARDATA(kernel_source);
 	source_len[0] = strlen(pgstrom_common_clhead);
 	source_len[1] = VARSIZE(kernel_source) - VARHDRSZ;
+	
 	clprog->program = clCreateProgramWithSource(clprog->clcxt->context,
 												2,
 												source_str,
@@ -368,9 +387,21 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 		free(clprog);
 		return NULL;
 	}
+	dlist_push_tail(&clprog->waitq, &chunk->chain);
+	dlist_push_tail(&clprog_slot[index], &clprog->chain);
 
 	/*
-	 * Launch asynchronous build process
+	 * NOTE: The reason why we don't kick clBuildProgram under clprog_lock
+	 * is that nvidia's driver don't launch asynchronous program building
+	 * even if callback was given, thus, its completion callback will be
+	 * invoked prior to return from clBuildProgram in this thread.
+	 * It also means the callback blocks forever when it tries to acquire
+	 * the same exclusive lock on same slot.
+	 */
+	pthread_mutex_unlock(&clprog_lock[index]);
+
+	/*
+	 * Set up program build options
 	 */
 	if (clprog->clcxt->dev_type == CL_DEVICE_TYPE_CPU)
 		device_type = "CPU";
@@ -405,10 +436,10 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 			vector_width = clprog->clcxt->vec_width_int;
 			break;
 	}
-
 	snprintf(build_opts, sizeof(build_opts),
 			 "-Werror -DSTROMCL_DEVICE_TYPE_%s -DSTROMCL_VECTOR_WIDTH=%u",
 			 device_type, vector_width);
+	dlog("build option of clprog=%p is '%s'", clprog, build_opts);
 
 	rc = clBuildProgram(clprog->program,
 						0,
@@ -416,22 +447,30 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 						build_opts,
 						clserv_cb_build_program,
 						clprog);
+	dlog("clBuildProgram of clprog=%p (%s)", clprog, opencl_strerror(rc));
 	if (rc != CL_SUCCESS)
 	{
-		pthread_mutex_unlock(&clprog_lock[index]);
-		chunk_backq(chunk, ERRCODE_INTERNAL_ERROR,
-					"failed on clBuildProgram (%s)",
-					opencl_strerror(rc));
-		clReleaseProgram(clprog->program);
-		free(clprog);
-		return NULL;
+		cl_build_status		status;
+
+		/*
+		 * When clBuildProgram does not return CL_SUCCESS, its build status
+		 * has to be CL_BUILD_ERROR to ensure chunks in the waiting queue
+		 * returns an error status to the caller.
+		 * Please note that current chunk is already in the waiting queue,
+		 * and nobody can back it to the caller unless program build status
+		 * become either CL_BUILD_SUCCESS or CL_BUILD_ERROR.
+		 */
+		if (clGetProgramBuildInfo(clprog->program,
+								  cldev->device_id,
+								  CL_PROGRAM_BUILD_STATUS,
+								  sizeof(cl_build_status),
+								  &status,
+								  NULL) != CL_SUCCESS &&
+			status != CL_BUILD_ERROR)
+			elog(FATAL, "clBuildProgram returned %s, but build status: %d",
+				 opencl_strerror(rc), status);
 	}
-	dlist_push_tail(&clprog->waitq, &chunk->chain);
-	dlist_push_tail(&clprog_slot[index], &clprog->chain);
-
-	pthread_mutex_unlock(&clprog_lock[index]);
-
-	return CLKERNEL_NOT_READY;
+	return NULL;
 }
 
 static void
@@ -1018,6 +1057,9 @@ clserv_worker_main(void *dummy)
 	cl_int			rc;
 	bool			unified_memory;
 
+	/* for debug tracking */
+	clserv_worker_index = (uintptr_t)dummy;
+
 	while (clserv_running)
 	{
 		/* dequeue a chunk-buffer from the queue */
@@ -1025,13 +1067,18 @@ clserv_worker_main(void *dummy)
 		if (!dnode)
 			continue;
 		chunk = dlist_container(ChunkBuffer, chain, dnode);
+		dlog("dequeue chunk (%p)", chunk);
 
 		/* check status of chunk buffer */
 		Assert(chunk->is_loaded || chunk->nitems == 0);
-		Assert(chunk->is_running);
+		Assert(chunk->recvq != NULL && chunk->is_running);
 
 		/* choose an appropriate device */
 		cldev = clserv_device_scheduler(chunk);
+		dlog("device %s was scheduled on chunk (%p)",
+			 !cldev ? "(null)" : cldev->prop.dev_name, chunk);
+		if (!cldev)
+			continue;
 
 		/*
 		 * create a cl_kernel object with supplied kernel source.
@@ -1042,7 +1089,8 @@ clserv_worker_main(void *dummy)
 		 * to the request queue again.
 		 */
 		clkern = clserv_create_kernel(cldev, chunk);
-		if (!clkern || clkern == CLKERNEL_NOT_READY)
+		dlog("clkern = %p on chunk (%p)", clkern, chunk);
+		if (!clkern)
 			continue;
 
 		/*
@@ -1617,8 +1665,7 @@ pgstrom_opencl_main(void *arg)
 {
 	pthread_attr_t	thread_attr;
 	pthread_t	   *thread_ids;
-	long	pagesz = sysconf(_SC_PAGESIZE);
-	int		i;
+	uintptr_t		i;
 
 	/* We're now ready to receive signals */
 	BackgroundWorkerUnblockSignals();
@@ -1631,8 +1678,7 @@ pgstrom_opencl_main(void *arg)
 	if (!thread_ids)
 		elog(ERROR, "out of memory");
 	if (pthread_attr_init(&thread_attr) != 0 ||
-		pthread_attr_setguardsize(&thread_attr, 2 * pagesz) != 0 ||
-		pthread_attr_setstacksize(&thread_attr, clserv_worker_stacksz) != 0)
+		pthread_attr_setguardsize(&thread_attr, PTHREAD_STACK_MIN) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to set up pthread attributes")));
@@ -1640,7 +1686,7 @@ pgstrom_opencl_main(void *arg)
 	for (i=0; i < clserv_num_workers; i++)
 	{
 		if (pthread_create(&thread_ids[i], &thread_attr,
-						   clserv_worker_main, NULL) != 0)
+						   clserv_worker_main, (void *)i) != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("failed to launch opencl worker thread")));
@@ -1666,7 +1712,7 @@ pgstrom_opencl_main(void *arg)
 	for (i=0; i < clserv_num_workers; i++)
 	{
 		if (pthread_join(thread_ids[i], NULL) != 0)
-			elog(LOG, "failed to join opencl worker thread %d", i);
+			elog(LOG, "failed to join opencl worker thread %lu", i);
 	}
 
 	/* TODO: wait for completion of running jobs */
@@ -1720,16 +1766,6 @@ pgstrom_opencl_server_init(void)
 							INT_MAX,
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.opencl_worker_stacksz",
-							"stack size of each worker thread in KB",
-							NULL,
-							&clserv_worker_stacksz,
-							0,	/* system default */
-							0,
-							INT_MAX / 1024,
-							PGC_SIGHUP,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
 	/* set up background worker process */
