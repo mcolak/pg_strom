@@ -81,6 +81,38 @@ typedef struct {
  * Local declarations
  */
 static int	pgstrom_max_async_chunks;
+static int	pgstrom_base_addr_align = -1;
+
+static void
+init_base_addr_align(void)
+{
+	DeviceProperty *devprop;
+
+	pgstrom_device_property_lock(false);
+	PG_TRY();
+	{
+		pgstrom_base_addr_align
+			= sizeof(cl_long) * PGSTROM_UNITSZ * BITS_PER_BYTE;
+
+		for (devprop = pgstrom_device_property_next(NULL);
+			 devprop != NULL;
+			 devprop = pgstrom_device_property_next(devprop))
+		{
+			if (devprop->is_local &&
+				devprop->dev_host_unified_memory &&
+				pgstrom_base_addr_align < devprop->dev_mem_base_addr_align)
+				pgstrom_base_addr_align = devprop->dev_mem_base_addr_align;
+		}
+		pgstrom_base_addr_align /= BITS_PER_BYTE;
+	}
+	PG_CATCH();
+	{
+		pgstrom_device_property_unlock();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	pgstrom_device_property_unlock();
+}
 
 /*
  * extract_kernel_params
@@ -312,28 +344,33 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	foreach (cell, sestate->kernel_cols)
 	{
 		Form_pg_attribute attr;
-        AttrNumber j = lfirst_int(cell) - 1;
+        AttrNumber	j = lfirst_int(cell) - 1;
+		int			unitlen;
 
 		Assert(j >= 0 && j < tupdesc->natts);
 		attr = tupdesc->attrs[j];
-		if (!attr->attnotnull)
+		if (attr->attnotnull)
+			kargs->offset[index].isnull = 0;	/* always not null */
+		else
 		{
+			offset = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ, offset);
 			kargs->offset[index].isnull = offset;
 			chunk->cb_isnull[j] = (bool *)(chunk->data + offset);
 			offset += sizeof(bool) * nitems;
 		}
+
+		unitlen = attr->attlen > 0 ? attr->attlen : sizeof(uint32);
+		offset = TYPEALIGN(unitlen * PGSTROM_UNITSZ, offset);
 		kargs->offset[index].values = offset;
 		chunk->cb_values[j] = (void *)(chunk->data + offset);
-		if (attr->attlen > 0)
-			offset += attr->attlen * nitems;
-		else
-			offset += sizeof(uint32) * nitems;
+		offset += unitlen * nitems;
 
 		index++;
 	}
 	chunk->dma_recv_start = offset;
 	Assert(kargs->i_rowmap == index);
 
+	offset = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ, offset);
 	kargs->offset[index].isnull = 0;
 	kargs->offset[index].values = offset;
 	chunk->cb_rowmap = (bool *)(chunk->data + offset);
@@ -348,9 +385,6 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 
 	kargs->nargs = index;
 	kargs->nitems = nitems;
-	
-
-
 
 	/* misc fields refresh */
 	chunk->is_loaded = false;
@@ -393,6 +427,7 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 		+ MAXALIGN(sizeof(bool *) * tupdesc->natts)
 		+ MAXALIGN(sizeof(void *) * tupdesc->natts)
 		+ MAXALIGN(sizeof(FormData_pg_attribute) * nargs)
+		+ pgstrom_base_addr_align
 		+ MAXALIGN(offsetof(kern_args_t, offset[nargs]));
 	/*
 	 * XXX - Right now, interface of PostgreSQL does not support to
@@ -403,7 +438,8 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	Assert(nrecv == 0);
 
 	/* For rowid map */
-	length += MAXALIGN(sizeof(bool) * PGSTROM_CHUNK_SIZE);
+	length = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ,
+					   sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
 
 	/* For kernel arguments */
 	foreach (cell, sestate->kernel_cols)
@@ -414,11 +450,14 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 		attr = tupdesc->attrs[j];
 
 		if (!attr->attnotnull)
-			length += MAXALIGN(sizeof(bool) * PGSTROM_CHUNK_SIZE);
+			length = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ,
+							   sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
 		if (attr->attlen > 0)
-			length += MAXALIGN(attr->attlen * PGSTROM_CHUNK_SIZE);
+			length = TYPEALIGN(attr->attlen * PGSTROM_UNITSZ,
+							   attr->attlen * PGSTROM_CHUNK_SIZE + length);
 		else
-			length += MAXALIGN(sizeof(uint32) * PGSTROM_CHUNK_SIZE);
+			length = TYPEALIGN(sizeof(uint32) * PGSTROM_UNITSZ,
+							   sizeof(uint32) * PGSTROM_CHUNK_SIZE + length);
 	}
 
 	/*
@@ -456,9 +495,7 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	offset += MAXALIGN(sizeof(void *) * tupdesc->natts);
 	chunk->cb_attrs = (Form_pg_attribute)(chunk->data + offset);
 	offset += MAXALIGN(sizeof(ATTRIBUTE_FIXED_PART_SIZE) * nargs);
-	chunk->cb_kargs = (kern_args_t *)(chunk->data + offset);
-	offset += TYPEALIGN(PGSTROM_ALIGN_SIZE,
-						offsetof(kern_args_t, offset[nargs]));
+
 	/*
 	 * Copy of FormData_pg_attribute, because it is never changed during
 	 * a particular foreign table scan.
@@ -478,7 +515,14 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	 */
 	Assert(index == nargs);
 
-	chunk->cb_kargs = (kern_args_t *)(chunk->cb_attrs + nargs);
+	/*
+	 * cb_kargs has to be aligned to pgstrom_base_addr_align, because
+	 * it may be used to opencl memory buffer if device supports host
+	 * unified memory.
+	 */
+	offset = TYPEALIGN(pgstrom_base_addr_align,
+					   chunk->data + offset) - (intptr_t)(chunk->data);
+	chunk->cb_kargs = (kern_args_t *)(chunk->data + offset);
 	chunk->cb_kargs->nargs = nargs;
 	chunk->cb_kargs->nitems = -1;		/* to be set later */
 	chunk->cb_kargs->i_rowmap = nsend;	/* right now, always 0 */
@@ -632,6 +676,15 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 		return;
 
 	/*
+	 * Calculation of base address alignment - In case when opencl device
+	 * support host unified memory space, we map shared memory segment as
+	 * buffer object of opencl as-is, thus, any objects that can perform
+	 * as kernel argument needs to be aligned.
+	 */
+	if (pgstrom_base_addr_align < 0)
+		init_base_addr_align();
+
+	/*
 	 * Construction of StromExecState
 	 */
 	sestate = palloc0(sizeof(StromExecState));
@@ -712,30 +765,40 @@ pgstrom_begin_foreign_scan(ForeignScanState *fss, int eflags)
 }
 
 static inline void
-pgstrom_invalidate_window(StromExecState *sestate, AttrNumber attnum)
+pgstrom_invalidate_window(StromExecState *sestate, AttrNumber j,
+						  bool should_free)
 {
-	AttrNumber	j = attnum - 1;
-
 	if (sestate->curr_cs_values[j])
 	{
-		pfree(sestate->curr_cs_values[j]);
+		if (should_free)
+			pfree(sestate->curr_cs_values[j]);
 		sestate->curr_cs_values[j] = NULL;
 	}
 	if (sestate->curr_cs_isnull[j])
 	{
-		pfree(sestate->curr_cs_isnull[j]);
+		if (should_free)
+			pfree(sestate->curr_cs_isnull[j]);
 		sestate->curr_cs_isnull[j] = NULL;
 	}
 	sestate->curr_cs_rowid[j] = -1;
 	sestate->curr_cs_nitems[j] = 0;
 }
 
+/*
+ * pgstrom_seek_window
+ *
+ * It moves current window of the column-store to focus on the supplied
+ * rowid, then set copied values on curr_cs_isnull and curr_cs_values.
+ * Older values shall be released if should_free is true, elsewhere caller
+ * has to release them.
+ */
 static bool
-pgstrom_do_seek_window(StromExecState *sestate,
-					   AttrNumber attnum, int64 rowid)
+pgstrom_seek_window(StromExecState *sestate, AttrNumber j, int64 rowid, 
+					bool should_free)
 {
 	MemoryContext	oldcxt;
 	TupleDesc		tupdesc = RelationGetDescr(sestate->cs_rel);
+	Form_pg_attribute attr = tupdesc->attrs[j];
 	HeapTuple		tuple = NULL;
 	ScanKeyData		skeys[2];
 	Datum			values[Natts_pg_strom_cs];
@@ -743,15 +806,18 @@ pgstrom_do_seek_window(StromExecState *sestate,
 	AttrNumber		new_attnum;
 	int64			new_rowid;
 	int32			new_nitems;
-	AttrNumber		j = attnum - 1;
 	bool			might_neighbor = false;
+
+	/* caller needs to check rowid points out of window */
+	Assert(rowid <  sestate->curr_cs_rowid[j] ||
+		   rowid >= sestate->curr_cs_rowid[j] + sestate->curr_cs_nitems[j]);
 
 	if (sestate->curr_cs_rowid[j] >= 0 &&
 		rowid < (sestate->curr_cs_rowid[j] + 2 * sestate->curr_cs_nitems[j]))
 		might_neighbor = true;
 
 	/* Clear the cached values */
-	pgstrom_invalidate_window(sestate, attnum);
+	pgstrom_invalidate_window(sestate, j, should_free);
 
 	if (might_neighbor)
 	{
@@ -763,7 +829,7 @@ pgstrom_do_seek_window(StromExecState *sestate,
 			new_attnum = DatumGetInt16(values[Anum_pg_strom_cs_attnum - 1]);
 			new_rowid = DatumGetInt64(values[Anum_pg_strom_cs_rowid - 1]);
 			new_nitems = DatumGetInt32(values[Anum_pg_strom_cs_nitems - 1]);
-			Assert(attnum == new_attnum);
+			Assert(new_attnum == attr->attnum);
 
 			if (rowid < new_rowid || rowid >= new_rowid + new_nitems)
 				tuple = NULL;
@@ -775,7 +841,7 @@ pgstrom_do_seek_window(StromExecState *sestate,
 		ScanKeyInit(&skeys[0],
 					Inum_pg_strom_cs_attnum,
 					BTEqualStrategyNumber, F_INT2EQ,
-					Int16GetDatum(attnum));
+					Int16GetDatum(attr->attnum));
 		ScanKeyInit(&skeys[1],
 					Inum_pg_strom_cs_rowid,
 					BTLessEqualStrategyNumber, F_INT8LE,
@@ -813,7 +879,7 @@ pgstrom_do_seek_window(StromExecState *sestate,
 		ScanKeyInit(&skeys[0],
 					Inum_pg_strom_cs_attnum,
 					BTEqualStrategyNumber, F_INT2EQ,
-					Int16GetDatum(attnum));
+					Int16GetDatum(attr->attnum));
 		ScanKeyInit(&skeys[1],
 					Inum_pg_strom_cs_rowid,
 					BTGreaterStrategyNumber, F_INT8GT,
@@ -836,16 +902,44 @@ pgstrom_do_seek_window(StromExecState *sestate,
 	return true;
 }
 
-static inline bool
-pgstrom_seek_window(StromExecState *sestate, AttrNumber attnum, int64 rowid)
+static inline Datum
+pgstrom_fetch_cs_datum(StromExecState *sestate,
+					   AttrNumber j, int64 rowid, bool *p_isnull,
+					   bool should_free)
 {
-	Assert(attnum > 0 &&
-		   attnum <= RelationGetNumberOfAttributes(sestate->frel));
-	if (rowid >= sestate->curr_cs_rowid[attnum - 1] &&
-		rowid < (sestate->curr_cs_rowid[attnum - 1] +
-				 sestate->curr_cs_nitems[attnum - 1]))
-		return true;
-	return pgstrom_do_seek_window(sestate, attnum, rowid);
+	TupleDesc	tupdesc = RelationGetDescr(sestate->frel);
+	bytea	   *curr_isnull;
+	bytea	   *curr_values;
+	int			i;
+
+	Assert(j >= 0 && j < tupdesc->natts);
+	if (rowid <  sestate->curr_cs_rowid[j] ||
+		rowid >= sestate->curr_cs_rowid[j] + sestate->curr_cs_nitems[j])
+	{
+		if (!pgstrom_seek_window(sestate, j, rowid, should_free))
+			goto out_null;
+	}
+	curr_isnull = sestate->curr_cs_isnull[j];
+	curr_values = sestate->curr_cs_values[j];
+	i = rowid - sestate->curr_cs_rowid[j];
+
+	if (!curr_isnull || !(((bool *)VARDATA(curr_isnull))[i]))
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
+
+		*p_isnull = false;
+		if (attr->attlen > 0)
+			return fetchatt(attr, (VARDATA(curr_values) + attr->attlen * i));
+		else
+		{
+			uint16 *vl_offset = (uint16 *)VARDATA(curr_values);
+
+			return PointerGetDatum(VARDATA(curr_values) + vl_offset[i]);
+		}
+	}
+out_null:
+	*p_isnull = true;
+	return PointerGetDatum(NULL);
 }
 
 static inline void
@@ -862,7 +956,7 @@ pgstrom_load_column_store(StromExecState *sestate, ChunkBuffer *chunk,
 	char	   *cb_values = chunk->cb_values[j];
 
 	/* might conflict with column-store window */
-	pgstrom_invalidate_window(sestate, attr->attnum);
+	pgstrom_invalidate_window(sestate, j, true);
 
 	ScanKeyInit(&skeys[0],
 				Inum_pg_strom_cs_attnum,
@@ -935,139 +1029,137 @@ pgstrom_load_column_store(StromExecState *sestate, ChunkBuffer *chunk,
 }
 
 static inline void
-pgstrom_load_varlena(StromExecState *sestate, ChunkBuffer *chunk,
-					 int index, bool *rs_isnull, Datum *rs_values)
+pgstrom_load_varlena_column_store(StromExecState *sestate,
+								  ChunkBuffer *chunk)
 {
-	VarlenaBuffer *vlbuf;
-	int64		curr_rowid = chunk->rowid + index;
-	int32		curr_usage;
-	ListCell   *cell;
+	VarlenaBuffer  *vlbuf = NULL;
+	ListCell	   *cell;
+	bytea		  **vl_cache;
+	int				i, j, k, l;
 
-	/*
-	 * If this row is already removed, no need to load varlena data.
-	 * So, simply mark these values as NULL and return.
-	 */
-	if (!chunk->cb_rowmap[index])
+	vl_cache = palloc(sizeof(bytea *) * PGSTROM_UNITSZ *
+					  list_length(sestate->varlena_cols));
+
+	for (i=0; i < chunk->nitems; i+=PGSTROM_UNITSZ)
 	{
+		int64	curr_rowid = chunk->rowid + i;
+		Size	vl_length = 0;
+		List   *should_free = NIL;
+
+		/* calculation of estimated data length */
+		l = 0;
 		foreach (cell, sestate->varlena_cols)
 		{
-			AttrNumber	j = lfirst_int(cell) - 1;
+			bytea  *prev_values;
+			bytea  *prev_isnull;
+			bool	isnull;
+			Datum	datum;
 
-			chunk->cb_isnull[j][index] = true;
-			((uint32 *)chunk->cb_values[j])[index] = 0xffffffff;
-		}
-		return;
-	}
+			j = lfirst_int(cell) - 1;
+			prev_values = sestate->curr_cs_values[j];
+			prev_isnull = sestate->curr_cs_isnull[j];
 
-	/*
-	 * Note: all the varlena values for a particular rowid must be put
-	 * on same VarlenaBuffer. OpenCL server will transfer a regular
-	 * chunk-buffer and an optional varlena-buffer at once. In case when
-	 * multiple varlena-buffers are chained, kernel shall be executed
-	 * for each varlena-buffers repeatedly (because GPU DRAM is usually
-	 * less than host RAM, so need to avoid too much consumption).
-	 */
-	if (!dlist_is_empty(&chunk->vlbuf_list))
-	{
-		vlbuf = dlist_container(VarlenaBuffer, chain,
-								dlist_tail_node(&chunk->vlbuf_list));
-		curr_usage = vlbuf->usage;
-	}
-	else
-	{
-		vlbuf = NULL;
-		curr_usage = 0;
-	}
-	
-retry:
-	foreach (cell, sestate->varlena_cols)
-	{
-		AttrNumber	j = lfirst_int(cell) - 1;
-		bytea	   *v_body = NULL;
-		Size		v_size;
-
-		if (rs_values)
-		{
-			/*
-			 * In case of row-store, just fetch rs_isnull and rs_values
-			 * array.
-			 */
-			if (!rs_isnull || !rs_isnull[j])
-				v_body = (bytea *)DatumGetPointer(rs_values[j]);
-		}
-		else
-		{
-			if (pgstrom_seek_window(sestate, j+1, curr_rowid))
+			for (k=0; k < PGSTROM_UNITSZ; k++)
 			{
-				bytea  *curr_isnull = sestate->curr_cs_isnull[j];
-				bytea  *curr_values = sestate->curr_cs_values[j];
-				int		windex = curr_rowid - sestate->curr_cs_rowid[j];
-
-				if (!curr_isnull ||
-					!(((bool *)VARDATA(curr_isnull))[windex]))
+				datum = pgstrom_fetch_cs_datum(sestate, j, curr_rowid + k,
+											   &isnull, false);
+				if (isnull)
+					vl_cache[l * PGSTROM_UNITSZ + k] = NULL;
+				else
 				{
-					uint16 *v_offset = (uint16 *)VARDATA(curr_values);
+					vl_cache[l * PGSTROM_UNITSZ + k] = (bytea *)datum;
+					vl_length += INTALIGN(toast_raw_datum_size(datum));
+				}
 
-					v_body = (bytea *)(((char *)v_offset) + v_offset[windex]);
+				if (prev_isnull != sestate->curr_cs_isnull[j])
+				{
+					if (prev_isnull)
+						should_free = lappend(should_free, prev_isnull);
+					prev_isnull = sestate->curr_cs_isnull[j];
+				}
+				if (prev_values != sestate->curr_cs_values[j])
+				{
+					if (prev_values)
+						should_free = lappend(should_free, prev_values);
+					prev_values = sestate->curr_cs_values[j];
+				}
+			}
+			l++;
+		}
+
+		/*
+		 * In case when this unit of varlena values may overrun the
+		 * current varlena-buffer, we try to acquire a new one. If
+		 * no rows are on this buffer, it has to be enlarged to try
+		 * again.
+		 */
+		if (vlbuf == NULL ||
+			vlbuf->kvlbuf->length + vl_length > vlbuf->vlbuf_size)
+		{
+			Assert(!vlbuf || vlbuf->kvlbuf->nitems > 0);
+
+			if (vlbuf && chunk->varlena_sz < vlbuf->kvlbuf->length)
+				chunk->varlena_sz = vlbuf->kvlbuf->length;
+
+			/*
+			 * XXX - sestate->vlbuf_size needs to be smaller than
+			 * max memory allocation size of opencl device, to be
+			 * checked.
+			 */
+			while (sestate->vlbuf_size < vl_length * (PGSTROM_CHUNK_SIZE /
+													  PGSTROM_UNITSZ / 3))
+				sestate->vlbuf_size *= 2;
+
+			vlbuf = pgstrom_varlena_buffer_alloc(sestate->vlbuf_size,
+											pgstrom_base_addr_align, true);
+			vlbuf->kvlbuf->index = i;
+			vlbuf->kvlbuf->nitems = 0;
+			dlist_push_tail(&chunk->vlbuf_list, &vlbuf->chain);
+			chunk->nvarlena++;
+		}
+
+		/*
+		 * Copy the flatten varlena on the varlena buffer.
+		 */
+		l = 0;
+		foreach (cell, sestate->varlena_cols)
+		{
+			j = lfirst_int(cell) - 1;
+
+			for (k=0; k < PGSTROM_UNITSZ; k++)
+			{
+				bytea  *vl_body;
+				Size	vl_size;
+				char   *vl_ptr;
+
+				vl_body = (bytea *)vl_cache[l * PGSTROM_UNITSZ + k];
+				if (!vl_body)
+				{
+					Assert(chunk->cb_isnull[j] != NULL);
+					chunk->cb_isnull[j][i+k] = -1;
+					((uint32 *)chunk->cb_values[j])[i+k] = 0;
+				}
+				else
+				{
+					if (chunk->cb_isnull[j] != NULL)
+						chunk->cb_isnull[j][i+k] = 0;
+					((uint32 *)chunk->cb_values[j])[i+k]
+						= vlbuf->kvlbuf->length;
+					vl_ptr = ((char *)&vlbuf->kvlbuf) + vlbuf->kvlbuf->length;
+					vl_size = toast_raw_datum_size(PointerGetDatum(vl_body));
+					toast_extract_datum(vl_ptr, vl_body, vl_size);
+					vlbuf->kvlbuf->length += INTALIGN(vl_size);
+					Assert(vlbuf->kvlbuf->length <= vlbuf->vlbuf_size);
 				}
 			}
 		}
-
-		if (!v_body)
-		{
-			v_size = toast_raw_datum_size(PointerGetDatum(v_body));
-			if (!vlbuf)
-			{
-				vlbuf = pgstrom_varlena_buffer_alloc(sestate->vlbuf_size,
-													 true);
-				vlbuf->rowid = curr_rowid;
-				vlbuf->nitems = 0;
-				curr_usage = vlbuf->usage;
-
-				dlist_push_tail(&chunk->vlbuf_list, &vlbuf->chain);
-				chunk->nvarlena++;
-			}
-
-			/*
-			 * In case when this varlena value may overrun the current
-			 * varlena-buffer, we try to acquire a new one. If no rows
-			 * are on this buffer, it enlarged the buffer size then try
-			 * it again.
-			 */
-			if (vlbuf->length < curr_usage + MAXALIGN(v_size))
-			{
-				if (vlbuf->nitems == 0)
-				{
-					while (sestate->vlbuf_size < (curr_usage +
-												  MAXALIGN(v_size)))
-						sestate->vlbuf_size *= 2;
-
-					chunk->nvarlena--;
-					dlist_delete(&vlbuf->chain);
-					pgstrom_varlena_buffer_free(vlbuf);
-				}
-				vlbuf = NULL;
-				goto retry;
-			}
-			chunk->cb_isnull[j][index] = false;
-			((uint32 *)(chunk->cb_values[j]))[index] = curr_usage;
-			toast_extract_datum(vlbuf->data + curr_usage,
-								v_body,
-								v_size);
-			curr_usage += MAXALIGN(v_size);
-		}
-		else
-		{
-			chunk->cb_isnull[j][index] = true;
-			((uint32 *)chunk->cb_values[j])[index] = 0xffffffff;
-		}
+		vlbuf->kvlbuf->nitems += PGSTROM_UNITSZ;
+		list_free_deep(should_free);
 	}
-	if (vlbuf)
-	{
-		Assert(curr_usage <= vlbuf->length);
-		vlbuf->usage = curr_usage;
-		vlbuf->nitems++;
-	}
+	if (vlbuf && chunk->varlena_sz < vlbuf->kvlbuf->length)
+		chunk->varlena_sz = vlbuf->kvlbuf->length;
+
+	pfree(vl_cache);
 }
 
 static bool
@@ -1081,7 +1173,6 @@ pgstrom_load_column_rowmap(StromExecState *sestate, ChunkBuffer *chunk)
 	Datum		values[Natts_pg_strom_rmap];
 	bool		isnull[Natts_pg_strom_rmap];
 	ListCell   *cell;
-	int			i;
 
 	Assert(sestate->rmap_scan != NULL);
 
@@ -1127,24 +1218,123 @@ pgstrom_load_column_rowmap(StromExecState *sestate, ChunkBuffer *chunk)
 			pgstrom_load_column_store(sestate, chunk, attr);
 	}
 	if (sestate->varlena_cols != NULL)
-	{
-		for (i=0; i < nitems; i++)
-			pgstrom_load_varlena(sestate, chunk, i, NULL, NULL);
-	}
+		pgstrom_load_varlena_column_store(sestate, chunk);
+
 	chunk->is_loaded = true;
 
 	return true;
+}
+
+static inline void
+pgstrom_load_varlena_row_store(StromExecState *sestate,
+							   ChunkBuffer *chunk)
+{
+	TupleDesc		tupdesc = RelationGetDescr(sestate->rs_rel);
+	HeapTuple	   *rs_cache = chunk->rs_cache;
+	VarlenaBuffer  *vlbuf = NULL;
+	ListCell	   *cell;
+	int				i, k;
+
+	Assert(rs_cache != NULL);
+	for (i=0; i < chunk->nitems; i+=PGSTROM_UNITSZ)
+	{
+		Size	vl_length = 0;
+		Size	vl_size;
+		Datum	vl_body;
+		bool	vl_isnull;
+		char   *vl_ptr;
+
+		/* calculate varlena size to be added */
+		for (k=0; k < PGSTROM_UNITSZ; k++)
+		{
+			if (!chunk->cb_rowmap[i+k])
+				continue;
+
+			foreach (cell, sestate->varlena_cols)
+			{
+				AttrNumber	attnum = lfirst_int(cell);
+
+				vl_body = fastgetattr(rs_cache[i+k], attnum,
+									  tupdesc, &vl_isnull);
+				if (!vl_isnull)
+					vl_length += INTALIGN(toast_raw_datum_size(vl_body));
+			}
+		}
+
+		/* allocate varlena buffer, if needed */
+		if (!vlbuf ||
+			vlbuf->kvlbuf->length + vl_length > vlbuf->vlbuf_size)
+		{
+			Assert(!vlbuf || vlbuf->kvlbuf->nitems > 0);
+
+			if (vlbuf && chunk->varlena_sz > vlbuf->kvlbuf->length)
+				chunk->varlena_sz = vlbuf->kvlbuf->length;
+
+			/* adjust length of varlena-buffer */
+			while (sestate->vlbuf_size < vl_length * (PGSTROM_CHUNK_SIZE /
+													  PGSTROM_UNITSZ / 3))
+				sestate->vlbuf_size *= 2;
+
+			vlbuf = pgstrom_varlena_buffer_alloc(sestate->vlbuf_size,
+											pgstrom_base_addr_align, true);
+			vlbuf->kvlbuf->index = i;
+			vlbuf->kvlbuf->nitems = 0;
+			dlist_push_tail(&chunk->vlbuf_list, &vlbuf->chain);
+			chunk->nvarlena++;
+		}
+
+		/* copy varlena values onto VarlenaBuffer */
+		foreach (cell, sestate->varlena_cols)
+		{
+			AttrNumber	j = lfirst_int(cell) - 1;
+			bool	   *cb_isnull = chunk->cb_isnull[j];
+			uint32	   *cb_values = chunk->cb_values[j];
+
+			for (k=0; k < PGSTROM_UNITSZ; k++)
+			{
+				/*
+				 * If this row is already deleted, no need to load varlena
+				 * data here. So, we simply mark them as NULL.
+				 */
+				if (!chunk->cb_rowmap[i+k])
+				{
+					cb_isnull[i+k] = -1;
+					cb_values[i+k] = 0;
+					continue;
+				}
+
+				vl_body = fastgetattr(rs_cache[i+k], j+1,
+									  tupdesc, &vl_isnull);
+				if (vl_isnull)
+				{
+					cb_isnull[i+k] = -1;
+					cb_values[i+k] = 0;
+				}
+				else
+				{
+					cb_isnull[i+k] = 0;
+					cb_values[i+k] = vlbuf->kvlbuf->length;
+					vl_size = toast_raw_datum_size(vl_body);
+					vl_ptr = (char *)&vlbuf->kvlbuf + vlbuf->kvlbuf->length;
+					toast_extract_datum(vl_ptr, (bytea *)vl_body, vl_size);
+					vlbuf->kvlbuf->length += INTALIGN(vl_size);
+				}
+			}
+		}
+		vlbuf->kvlbuf->nitems += PGSTROM_UNITSZ;
+	}
+
+	if (chunk->varlena_sz > vlbuf->kvlbuf->length)
+		chunk->varlena_sz = vlbuf->kvlbuf->length;
 }
 
 static bool
 pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 {
 	MemoryContext oldcxt;
-	TupleDesc	tupdesc;
+	TupleDesc	tupdesc = RelationGetDescr(sestate->rs_rel);
 	HeapTuple	tuple;
 	int			i, nitems, nitems_ex;
-	bool	   *rs_isnull;
-	Datum	   *rs_values;
 	ListCell   *cell;
 
 	if (!chunk->rs_cache)
@@ -1180,8 +1370,8 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	}
 	if (nitems == 0)
 		return false;
-	/* expand nitems to the alignment size of PGSTROM_ALIGN_SIZE */
-	nitems_ex = (nitems + PGSTROM_ALIGN_SIZE - 1) & ~(PGSTROM_ALIGN_SIZE - 1);
+	/* expand nitems to the alignment size of PGSTROM_UNITSZ */
+	nitems_ex = (nitems + PGSTROM_UNITSZ - 1) & ~(PGSTROM_UNITSZ - 1);
 	Assert(nitems_ex <= PGSTROM_CHUNK_SIZE);
 
 	/* to avoid rowid == 0, using PGSTROM_CHUNK_SIZE instead */
@@ -1191,53 +1381,54 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	 * organize the fetched tuples according to the manner
 	 * of column-oriented chunk buffer.
 	 */
-	tupdesc = RelationGetDescr(sestate->rs_rel);
-	rs_isnull = palloc(sizeof(bool) * tupdesc->natts);
-	rs_values = palloc(sizeof(Datum) * tupdesc->natts);
+	memset(chunk->cb_rowmap, 0, sizeof(bool) * nitems);
+	if (nitems_ex != nitems)
+		memset(chunk->cb_rowmap + nitems, -1,
+			   sizeof(bool) * (nitems_ex - nitems));
 
-	memset(chunk->cb_rowmap, 0, sizeof(bool) * nitems_ex);
 	if (sestate->kernel_cols == NIL)
 		return true;
 
 	Assert(nitems_ex <= PGSTROM_CHUNK_SIZE);
-	for (i=0; i < nitems; i++)
+	foreach (cell, sestate->kernel_cols)
 	{
-		heap_deform_tuple(chunk->rs_cache[i], tupdesc,
-						  rs_values, rs_isnull);
+		AttrNumber	attnum = lfirst_int(cell);
+		Form_pg_attribute attr = tupdesc->attrs[attnum - 1];
+		char	   *cb_values;
+		bool	   *cb_isnull;
+		Datum		rs_value;
+		bool		rs_isnull;
 
-		foreach (cell, sestate->kernel_cols)
+		if (attr->attlen < 0)
+			continue;
+
+		cb_values = chunk->cb_values[attnum - 1];
+		cb_isnull = chunk->cb_isnull[attnum - 1];
+		for (i=0; i < nitems; i++)
 		{
-			AttrNumber			j = lfirst_int(cell) - 1;
-			Form_pg_attribute	attr = tupdesc->attrs[j];
-			bool			   *cb_isnull = (bool *)chunk->cb_isnull[j];
-			char			   *cb_values = (char *)chunk->cb_values[j];
-
-			if (attr->attlen < 0)
-				continue;
-
-			cb_isnull[i] = rs_isnull[j];
+			rs_value = fastgetattr(chunk->rs_cache[i],
+								   attnum, tupdesc, &rs_isnull);
+			cb_isnull[i] = rs_isnull;
 			if (attr->attbyval)
 				store_att_byval(cb_values + attr->attlen * i,
-								rs_values[j], attr->attlen);
+								rs_value, attr->attlen);
 			else
 				memcpy(cb_values + attr->attlen * i,
-					   DatumGetPointer(rs_values[j]), attr->attlen);
+					   DatumGetPointer(rs_value), attr->attlen);
 		}
-		if (sestate->varlena_cols != NIL)
-			pgstrom_load_varlena(sestate, chunk, i, rs_isnull, rs_values);
 	}
+	if (sestate->varlena_cols != NIL)
+		pgstrom_load_varlena_row_store(sestate, chunk);
 
 	/*
 	 * Put some dummy data if original 'nitem' is not a multiple number
-	 * of PGSTROM_ALIGN_SIZE; to ensure vector load / store operation is
+	 * of PGSTROM_UNITSZ; to ensure vector load / store operation is
 	 * available around boundary.
 	 */
 	if (nitems_ex > nitems)
 	{
 		int		drift = nitems_ex - nitems;
 
-		memset(chunk->cb_rowmap + sizeof(bool) * nitems,
-			   -1, sizeof(bool) * drift);
 		foreach (cell, sestate->kernel_cols)
 		{
 			AttrNumber	j = lfirst_int(cell) - 1;
@@ -1251,7 +1442,7 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 					   0, attr->attlen * drift);
 			else
 				memset(cb_values + sizeof(int) * nitems,
-					   0, sizeof(int) * drift);
+					   0, sizeof(uint32) * drift);
 		}
 	}
 	chunk->is_loaded = true;
@@ -1484,8 +1675,8 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 		 */
 		if (sestate->curr_vlbuf)
 		{
-			while (curr_rowid > (sestate->curr_vlbuf->rowid +
-								 sestate->curr_vlbuf->nitems))
+			while (curr_index > (sestate->curr_vlbuf->kvlbuf->index +
+								 sestate->curr_vlbuf->kvlbuf->nitems))
 			{
 				dlist_node *dnode;
 
@@ -1536,41 +1727,21 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 					char   *vlbuf_base;
 
 					Assert(sestate->curr_vlbuf);
-					Assert(curr_rowid >= sestate->curr_vlbuf->rowid &&
-						   curr_rowid < (sestate->curr_vlbuf->rowid +
-										 sestate->curr_vlbuf->nitems));
+					Assert(curr_index >= sestate->curr_vlbuf->kvlbuf->index &&
+						   curr_index < (sestate->curr_vlbuf->kvlbuf->index +
+										 sestate->curr_vlbuf->kvlbuf->nitems));
 					offset = ((uint32 *)chunk->cb_values[j])[curr_index];
-					vlbuf_base = (char *)sestate->curr_vlbuf->data;
+					vlbuf_base = (char *)&sestate->curr_vlbuf->kvlbuf;
 					slot->tts_values[j]
 						= PointerGetDatum((bytea *)(vlbuf_base + offset));
 				}
 			}
-			else if (pgstrom_seek_window(sestate, j+1, curr_rowid))
+			else
 			{
-				int		i = curr_rowid - sestate->curr_cs_rowid[j];
-				bytea  *cs_isnull = sestate->curr_cs_isnull[j];
-				bytea  *cs_values = sestate->curr_cs_values[j];
-
-				if (!cs_isnull || !((bool *)VARDATA(cs_isnull))[i])
-				{
-					Form_pg_attribute attr = tupdesc->attrs[j];
-
-					slot->tts_isnull[j] = false;
-					if (attr->attlen > 0)
-					{
-						slot->tts_values[j]
-							= fetchatt(attr, (VARDATA(cs_values) +
-											  attr->attlen * i));
-					}
-					else
-					{
-						uint16 *cs_offset = (uint16 *)VARDATA(cs_values);
-						void   *cs_varlena;
-
-						cs_varlena = VARDATA(cs_values) + cs_offset[i];
-						slot->tts_values[j] = PointerGetDatum(cs_varlena);
-					}
-				}
+				slot->tts_values[j]
+					= pgstrom_fetch_cs_datum(sestate, j, curr_rowid,
+											 slot->tts_isnull + j,
+											 true);
 			}
 		}
 		slot = ExecStoreVirtualTuple(slot);

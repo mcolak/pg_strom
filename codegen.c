@@ -1263,7 +1263,7 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 {
 	clFuncInfo *finfo;
 	ListCell   *cell;
-	int			index;
+	int			index = 0;
 
 	finfo = pgstrom_clfunc_lookup(func_oid);
 	if (!finfo)
@@ -1278,7 +1278,7 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 	context->type_list = list_append_unique(context->type_list,
 											finfo->func_rettype);
 
-	appendStringInfo(buf, "%s(", finfo->func_ident);
+	appendStringInfo(buf, "%s(&rmap", finfo->func_ident);
 	index = 0;
 	foreach (cell, func_args)
 	{
@@ -1290,10 +1290,8 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 				 format_type_be(exprType(expr)));
 		context->type_list = list_append_unique(context->type_list,
 												finfo->func_argtypes[index]);
-		if (index > 0)
-			appendStringInfo(buf, ", ");
+		appendStringInfo(buf, ", ");
 		codegen_kernel_expr(buf, context, expr);
-
 		index++;
 	}
 	appendStringInfo(buf, ")");
@@ -1359,7 +1357,7 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 	context->type_list = list_append_unique(context->type_list,
 											finfo->func_rettype);
 
-	appendStringInfo(buf, "%s(", finfo->func_ident);
+	appendStringInfo(buf, "%s(&rmap", finfo->func_ident);
 	foreach (cell, args)
 	{
 		Node   *expr = lfirst(cell);
@@ -1367,8 +1365,7 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 		if (exprType(expr) != BOOLOID)
 			elog(ERROR, "Bug? BoolExpr takes non-bool argument");
 
-		if (cell != list_head(args))
-			appendStringInfo(buf, ", ");
+		appendStringInfo(buf, ", ");
 		codegen_kernel_expr(buf, context, expr);
 	}
 	appendStringInfo(buf, ")");
@@ -1474,6 +1471,7 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	int				usecnt_curr;
 	ListCell	   *cell;
 	List		   *kernel_cols = NIL;
+	bool			has_varlena = false;
 	StringInfoData	kern_qual;
 	StringInfoData	kern_body;
 
@@ -1522,6 +1520,14 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		 */
 		context.attrs[attnum - 1].attnum = ++attidx;
 
+		/*
+		 * In case when we need to move varlena variables to kernel,
+		 * nitems value shall be informed via kern_vlbuf_t, instead of
+		 * kern_args_t.
+		 */
+		if (context.attrs[attnum - 1].attlen < 0)
+			has_varlena = true;
+
 		ReleaseSysCache(tuple);
 	}
 
@@ -1555,27 +1561,27 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	appendStringInfo(
 		&kern_body,
 		"__kernel void kernel_qual(\n"
-		"  __private int            nitems,\n"
-		"  __global  kern_params_t *kparams,\n"
-		"  __global  kern_arg_t    *kargs,\n"
-		"  __global  char          *kvlbuf,\n"
-		"  __global  char          *gwkmem)\n"
+		"  __global kern_params_t *kparams,\n"
+		"  __global kern_args_t   *kargs,\n"
+		"  __global kern_vlbuf_t  *kvlbuf,\n"
+		"  __global char          *gwkmem)\n"
 		"{\n"
+		"  int nitems = %s->nitems;\n"
 		"  int rowidx = get_global_id(1) * STROMCL_VECTOR_WIDTH;\n"
 		"  char_v rmap;\n"
-		"  pg_char_v result;\n"
+		"  pg_bool_v result;\n"
 		"\n"
 		"  if (get_global_id(1) >= get_global_offset(1) + nitems)\n"
 		"    return;\n"
 		"\n"
 		"  rmap = pg_vload(get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"  result = (%s);\n"
-		"  rmap |= ((rmap == (char)0) &\n"
-		"           (result.isnull != 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
-		"  rmap |= ((rmap == (char)0) &\n"
-		"           (result.value == 0) & STROMCL_ERRCODE_ROW_MASKED;\n"
+		"  rmap |= (!rmap & (!!result.isnull | !result.value) &\n"
+		"           STROMCL_ERRCODE_ROW_MASKED);\n"
 		"  pg_vstore(rmap, get_global_id(1), ROWMAP_BASE(kargs));\n"
-		"}\n\n", kern_qual.data);
+		"}\n",
+		has_varlena ? "kvlbuf" : "kargs",
+		kern_qual.data);
 	SET_VARSIZE(kern_body.data, kern_body.len);
 
 	*p_kernel_cols = kernel_cols;

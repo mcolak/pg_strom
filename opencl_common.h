@@ -187,6 +187,9 @@ typedef double		double_v;
 	} pg_##NAME##_v;
 #define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)		\
 	STROMCL_SIMPLE_TYPE_TEMPLATE(NAME, __global varlena *)
+#define __VARLENA(p_base,offset)					\
+	(__global varlena *)(((offset) > 0) &			\
+						 ((__global char *)(p_base) + (offset)))
 
 /* Template of pg_vref_<name> function for native types */
 #define STROMCL_NATIVE_VARREF_TEMPLATE(NAME,BASE)					\
@@ -200,16 +203,16 @@ typedef double		double_v;
 		__global BASE *p_values;									\
 		__global char *p_isnull;									\
 																	\
-		if (kargs->offset[j].isnull == 0)							\
+		if (kargs->offset[attidx].isnull == 0)						\
 			result.isnull = (char)0;								\
 		else														\
 		{															\
 			p_isnull = (((__global char *)kargs) +					\
-						kargs->offset[j].isnull);					\
+						kargs->offset[attidx].isnull);				\
 			result.isnull = pg_vload(rowidx, p_isnull);				\
 		}															\
 		p_values = (__global BASE *)(((__global char *)kargs) +		\
-									 kargs->offset[j].values);		\
+									 kargs->offset[attidx].values);	\
 		result.value = pg_vload(rowidx, p_values);					\
 																	\
 		return result;												\
@@ -227,16 +230,16 @@ typedef double		double_v;
 		__global BASE *p_values;									\
 		__global char *p_isnull;									\
 																	\
-		if (kargs->offset[j].isnull == 0)							\
+		if (kargs->offset[attidx].isnull == 0)						\
 			result.isnull = (char)0;								\
 		else														\
 		{															\
 			p_isnull = (((__global char *)kargs) +					\
-						kargs->offset[j].isnull);					\
+						kargs->offset[attidx].isnull);				\
 			result.isnull = pg_vload(rowidx, p_isnull);				\
 		}															\
 		p_values = (__global BASE *)(((__global char *)kargs) +		\
-									 kargs->offset[j].values);		\
+									 kargs->offset[attidx].values);	\
 		IF_VEC01(result.value.s0 = p_values[rowidx++]);				\
 		IF_VEC02(result.value.s1 = p_values[rowidx++]);				\
 		IF_VEC04(result.value.s2 = p_values[rowidx++]);				\
@@ -270,32 +273,32 @@ typedef double		double_v;
 		__global uint *p_offset										\
 		__global char *p_isnull;									\
 																	\
-		if (kargs->offset[j].isnull == 0)							\
+		if (kargs->offset[attidx].isnull == 0)						\
 			ret.isnull = (char)0;									\
 		else														\
 		{															\
 			p_isnull = (((__global char *)kargs) +					\
-						kargs->offset[j].isnull);					\
+						kargs->offset[attidx].isnull);				\
 			ret.isnull = pg_vload(rowidx, p_isnull);				\
 		}															\
 		p_offset = (__global BASE *)(((__global char *)kargs) +		\
-									 kargs->offset[j].values);		\
-		IF_VEC01(ret.value.s0 = (varlena *)(kvlbuf + p_offset[rowidx])); \
-		IF_VEC02(ret.value.s1 = (varlena *)(kvlbuf + p_offset[rowidx+ 1])); \
-		IF_VEC04(ret.value.s2 = (varlena *)(kvlbuf + p_offset[rowidx+ 2])); \
-		IF_VEC04(ret.value.s3 = (varlena *)(kvlbuf + p_offset[rowidx+ 3])); \
-		IF_VEC08(ret.value.s4 = (varlena *)(kvlbuf + p_offset[rowidx+ 4])); \
-		IF_VEC08(ret.value.s5 = (varlena *)(kvlbuf + p_offset[rowidx+ 5])); \
-		IF_VEC08(ret.value.s6 = (varlena *)(kvlbuf + p_offset[rowidx+ 6])); \
-		IF_VEC08(ret.value.s7 = (varlena *)(kvlbuf + p_offset[rowidx+ 7])); \
-		IF_VEC16(ret.value.s8 = (varlena *)(kvlbuf + p_offset[rowidx+ 8])); \
-		IF_VEC16(ret.value.s9 = (varlena *)(kvlbuf + p_offset[rowidx+ 9])); \
-		IF_VEC16(ret.value.sa = (varlena *)(kvlbuf + p_offset[rowidx+10])); \
-		IF_VEC16(ret.value.sb = (varlena *)(kvlbuf + p_offset[rowidx+11])); \
-		IF_VEC16(ret.value.sc = (varlena *)(kvlbuf + p_offset[rowidx+12])); \
-		IF_VEC16(ret.value.sd = (varlena *)(kvlbuf + p_offset[rowidx+13])); \
-		IF_VEC16(ret.value.se = (varlena *)(kvlbuf + p_offset[rowidx+14])); \
-		IF_VEC16(ret.value.sf = (varlena *)(kvlbuf + p_offset[rowidx+15])); \
+									 kargs->offset[attidx.values]);	\
+		IF_VEC01(ret.value.s0 = __VARLENA(kvlbuf, p_offset[rowidx + 0])); \
+		IF_VEC02(ret.value.s1 = __VARLENA(kvlbuf, p_offset[rowidx + 1])); \
+		IF_VEC04(ret.value.s2 = __VARLENA(kvlbuf, p_offset[rowidx + 2])); \
+		IF_VEC04(ret.value.s3 = __VARLENA(kvlbuf, p_offset[rowidx + 3])); \
+		IF_VEC08(ret.value.s4 = __VARLENA(kvlbuf, p_offset[rowidx + 4])); \
+		IF_VEC08(ret.value.s5 = __VARLENA(kvlbuf, p_offset[rowidx + 5])); \
+		IF_VEC08(ret.value.s6 = __VARLENA(kvlbuf, p_offset[rowidx + 6])); \
+		IF_VEC08(ret.value.s7 = __VARLENA(kvlbuf, p_offset[rowidx + 7])); \
+		IF_VEC16(ret.value.s8 = __VARLENA(kvlbuf, p_offset[rowidx + 8])); \
+		IF_VEC16(ret.value.s9 = __VARLENA(kvlbuf, p_offset[rowidx + 9])); \
+		IF_VEC16(ret.value.sa = __VARLENA(kvlbuf, p_offset[rowidx +10])); \
+		IF_VEC16(ret.value.sb = __VARLENA(kvlbuf, p_offset[rowidx +11])); \
+		IF_VEC16(ret.value.sc = __VARLENA(kvlbuf, p_offset[rowidx +12])); \
+		IF_VEC16(ret.value.sd = __VARLENA(kvlbuf, p_offset[rowidx +13])); \
+		IF_VEC16(ret.value.se = __VARLENA(kvlbuf, p_offset[rowidx +14])); \
+		IF_VEC16(ret.value.sf = __VARLENA(kvlbuf, p_offset[rowidx +15])); \
 																	\
 		return result;												\
 	}
@@ -376,8 +379,7 @@ typedef double		double_v;
 		else													\
 		{														\
 			result.isnull = (char)(0);							\
-			value = (__global varlena *)						\
-				(((__global char *)kparams) + p_offset);		\
+			value = __VARLENA(kparams, p_offset);				\
 			IF_VEC01(result.value.s0 = value);					\
 			IF_VEC02(result.value.s1 = value);					\
 			IF_VEC04(result.value.s2 = value);					\
@@ -438,6 +440,16 @@ typedef struct {
 		cl_int	values;
 	} offset[0];
 } kern_args_t;
+
+/*
+ * Varlena Buffer - 3rd argument of kernel function
+ */
+typedef struct {
+	cl_int		index;	/* row offset from head of chunk-buffer */
+	cl_int		nitems;	/* row width of this chunk-buffer */
+	cl_int		length;
+	cl_char		data[0];
+} kern_vlbuf_t;
 
 /*
  * Error codes

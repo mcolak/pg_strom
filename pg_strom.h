@@ -61,13 +61,13 @@
  *   floating-point operations, thus nitems must be multiple numbers of 16
  *   to ensure vload / vstore working safety.
  */
-#define PGSTROM_ALIGN_SIZE		32
+#define PGSTROM_UNITSZ			32
 #define PGSTROM_CHUNK_SIZE								\
 	((MaximumBytesPerTuple(1)							\
 	  - MAXALIGN(offsetof(HeapTupleHeaderData, t_bits))	\
 	  - sizeof(int64)									\
 	  - sizeof(int32)									\
-	  - VARHDRSZ) & ~(PGSTROM_ALIGN_SIZE - 1))
+	  - VARHDRSZ) & ~(PGSTROM_UNITSZ - 1))
 
 /* data length that can be used to save isnull/values */
 #define PGSTROM_CSTORE_DATASZ										\
@@ -161,12 +161,9 @@ typedef struct {
 } ChunkBuffer;
 
 typedef struct {
-	dlist_node			chain;
-	uint32				length;
-	uint32				usage;
-	uint64				rowid;
-	uint32				nitems;
-	char				data[0];
+	dlist_node		chain;
+	size_t			vlbuf_size;
+	kern_vlbuf_t   *kvlbuf;
 } VarlenaBuffer;
 
 typedef struct {
@@ -329,6 +326,7 @@ extern ChunkBuffer *pgstrom_chunk_buffer_alloc(Size total_length,
 extern void pgstrom_chunk_buffer_free(ChunkBuffer *chunk);
 extern void pgstrom_chunk_buffer_return(ChunkBuffer *chunk, int error_code);
 extern VarlenaBuffer *pgstrom_varlena_buffer_alloc(Size total_length,
+												   Size kernel_align,
 												   bool abort_on_error);
 extern void pgstrom_varlena_buffer_free(VarlenaBuffer *vlbuf);
 extern DeviceProperty *pgstrom_device_property_alloc(DeviceProperty *templ,

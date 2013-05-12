@@ -425,7 +425,7 @@ flush_vstate_to_column_store(VacuumState *vstate)
 	StringInfoData buf;
 
 	Assert(vstate->cs_nitems == PGSTROM_CHUNK_SIZE);
-	Assert(vstate->cs_nitems % PGSTROM_ALIGN_SIZE == 0);
+	Assert(vstate->cs_nitems % PGSTROM_UNITSZ == 0);
 	initStringInfo(&buf);
 
 	/*

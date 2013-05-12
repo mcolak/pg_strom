@@ -293,6 +293,7 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 				clkern->chunk = chunk;
 				clkern->cldev = cldev;
 				clkern->clprog = clprog;
+				clkern->n_kernels = n_kernels;
 				clkern->kernels = (cl_kernel *)(clkern->data);
 				clkern->events = (cl_event *)(clkern->kernels + n_kernels);
 				clkern->arg_vlbufs = (cl_mem *)(clkern->events + n_events);
@@ -565,8 +566,8 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 	if (rc != CL_SUCCESS)
 	{
 		chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-					"failed on clCreateSubBuffer (%s)",
-					opencl_strerror(rc));
+					"failed on clCreateSubBuffer (%s) offset = %lu",
+					opencl_strerror(rc), region.origin);
 		return false;
 	}
 	clkern->arg_kparams = temp;
@@ -598,8 +599,8 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 			VarlenaBuffer  *vlbuf
 				= dlist_container(VarlenaBuffer, chain, iter.cur);
 
-			region.origin = (uintptr_t)vlbuf->data - shmem_start;
-			region.size = shmem_end - shmem_start;
+			region.origin = (uintptr_t)(&vlbuf->kvlbuf) - shmem_start;
+			region.size = vlbuf->kvlbuf->length;
 			temp = clCreateSubBuffer(host_shmem,
 									 CL_MEM_READ_WRITE,
 									 CL_BUFFER_CREATE_TYPE_REGION,
@@ -673,7 +674,12 @@ clserv_alloc_device_memory(openclKernel *clkern)
 	}
 	clkern->arg_kargs = temp;
 
-	if (!dlist_is_empty(&chunk->vlbuf_list))
+	if (dlist_is_empty(&chunk->vlbuf_list))
+	{
+		Assert(clkern->n_kernels == 1);
+        clkern->arg_vlbufs[0] = NULL;
+	}
+	else
 	{
 		dlist_foreach(iter, &chunk->vlbuf_list)
 		{
@@ -706,11 +712,6 @@ clserv_alloc_device_memory(openclKernel *clkern)
 			clkern->arg_vlbufs[i_vlbuf++] = temp;
 		}
 		Assert(clkern->n_kernels == i_vlbuf);
-	}
-	else
-	{
-		Assert(clkern->n_kernels == 1);
-        clkern->arg_vlbufs[0] = NULL;
 	}
 
 	/*
@@ -793,8 +794,8 @@ clserv_enqueue_varlena_send(openclKernel *clkern,
 								  clkern->arg_vlbufs[index],
 								  CL_FALSE,
 								  0,
-								  vlbuf->usage,
-								  vlbuf->data,
+								  vlbuf->kvlbuf->length,
+								  &vlbuf->kvlbuf,
 								  0,
 								  NULL,
 								  clkern->events + clkern->n_events);
@@ -806,8 +807,8 @@ clserv_enqueue_varlena_send(openclKernel *clkern,
                                   clkern->arg_vlbufs[index],
                                   CL_FALSE,
                                   0,
-                                  vlbuf->usage,
-                                  vlbuf->data,
+                                  vlbuf->kvlbuf->length,
+                                  &vlbuf->kvlbuf,
 								  1,
 								  clkern->events + clkern->n_events - 1,
 								  clkern->events + clkern->n_events);
@@ -872,22 +873,9 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	char			errmsg[1024];
 	cl_int			rc;
 
-	/* arg[0] : __private int nitems */
+	/* arg[0] : __global kern_params_t *kparams */
 	rc = clSetKernelArg(clkern->kernels[index],
 						0,
-						sizeof(cl_int),
-						&nitems);
-	if (rc != CL_SUCCESS)
-	{
-		snprintf(errmsg, sizeof(errmsg),
-				 "failed on clSetKernelArg of 0th argument (%s)",
-				 opencl_strerror(rc));
-		goto error_cleanup;
-	}
-
-	/* arg[1] : __global kern_params_t *kparams */
-	rc = clSetKernelArg(clkern->kernels[index],
-						1,
 						sizeof(cl_mem),
 						clkern->arg_kparams);
 	if (rc != CL_SUCCESS)
@@ -898,9 +886,9 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 		goto error_cleanup;
 	}
 
-	/* arg[2] : __global kern_args_t *kargs */
+	/* arg[1] : __global kern_args_t *kargs */
 	rc = clSetKernelArg(clkern->kernels[index],
-						2,
+						1,
 						sizeof(cl_mem),
 						clkern->arg_kargs);
 	if (rc != CL_SUCCESS)
@@ -911,9 +899,9 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 		goto error_cleanup;
 	}
 
-	/* arg[3] : __global char *vlbuf */
+	/* arg[2] : __global kern_vlbuf_t *vlbuf */
 	rc = clSetKernelArg(clkern->kernels[index],
-						3,
+						2,
 						sizeof(cl_mem),
 						clkern->arg_vlbufs[index]);
 	if (rc != CL_SUCCESS)
@@ -924,9 +912,9 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 		goto error_cleanup;
 	}
 
-	/* arg[4] : __global char *gwkmem */
+	/* arg[3] : __global char *gwkmem */
 	rc = clSetKernelArg(clkern->kernels[index],
-						4,
+						3,
 						sizeof(cl_mem),
 						clkern->arg_wkmem);
 	if (rc != CL_SUCCESS)
@@ -1141,13 +1129,13 @@ clserv_worker_main(void *dummy)
 				VarlenaBuffer  *vlbuf
 					= dlist_container(VarlenaBuffer, chain, iter.cur);
 
-				Assert(vlbuf->rowid >= chunk->rowid &&
-					   vlbuf->rowid + vlbuf->nitems <= (chunk->rowid +
-														chunk->nitems));
+				Assert(vlbuf->kvlbuf->index >= 0 &&
+					   (vlbuf->kvlbuf->index +
+						vlbuf->kvlbuf->nitems) <= chunk->nitems);
 				if (!clserv_enqueue_varlena_send(clkern, i_vlbuf, vlbuf) ||
 					!clserv_enqueue_kernel_exec(clkern, i_vlbuf,
-												vlbuf->rowid - chunk->rowid,
-												vlbuf->nitems))
+												vlbuf->kvlbuf->index,
+												vlbuf->kvlbuf->nitems))
 					goto error_cleanup;
 				i_vlbuf++;
 			}

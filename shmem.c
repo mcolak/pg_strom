@@ -588,10 +588,13 @@ pgstrom_kernel_params_free(KernelParams *kernel_params)
  * Interface for VarlenaBuffer
  */
 VarlenaBuffer *
-pgstrom_varlena_buffer_alloc(Size total_length, bool abort_on_error)
+pgstrom_varlena_buffer_alloc(Size vlbuf_sz, Size kernel_align,
+							 bool abort_on_error)
 {
 	ShmemBlock	   *block;
 	VarlenaBuffer  *vlbuf;
+	Size			total_length = (sizeof(VarlenaBuffer) +
+									kernel_align + vlbuf_sz);
 
 	block = pgstrom_shmem_alloc(SHMEM_BLOCK_VARLENA_BUFFER, total_length);
 	if (!block)
@@ -613,10 +616,14 @@ pgstrom_varlena_buffer_alloc(Size total_length, bool abort_on_error)
 	 * the chunk-buffer to be associated with.
 	 */
 	vlbuf = (VarlenaBuffer *)block->data;
-	memset(vlbuf, 0, offsetof(VarlenaBuffer, data));
-	vlbuf->length = total_length - offsetof(VarlenaBuffer, data);
-	vlbuf->usage = 0;
-
+	memset(vlbuf, 0, sizeof(VarlenaBuffer));
+	vlbuf->kvlbuf = (kern_vlbuf_t *)TYPEALIGN(kernel_align, vlbuf + 1);
+	vlbuf->kvlbuf->index  = -1;	/* to be set later */
+	vlbuf->kvlbuf->nitems = -1;	/* to be set later */
+	vlbuf->kvlbuf->length = INTALIGN((intptr_t)(vlbuf->kvlbuf->data) -
+									 (intptr_t)(vlbuf->kvlbuf));
+	vlbuf->vlbuf_size = ((intptr_t)vlbuf + total_length -
+						 (intptr_t)vlbuf->kvlbuf);
 	return vlbuf;
 }
 
