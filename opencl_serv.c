@@ -23,7 +23,7 @@
 #include "pg_strom.h"
 
 /* DEBUG messages */
-#if 0
+#if 1
 #define dlog(fmt,...)											\
 	fprintf(stderr, "clserv(worker:%03lu, %s:%d) : " fmt "\n",	\
 			clserv_worker_index,  __FUNCTION__, __LINE__, ##__VA_ARGS__)
@@ -80,6 +80,7 @@ typedef struct {
 	dlist_node		chain;
 	openclContext  *clcxt;
 	cl_program		program;
+	cl_int			vector_width;
 	dlist_head		waitq;
 	char			kernel_md5[MD5_SIZE];
 } openclProgram;
@@ -188,8 +189,6 @@ clserv_cb_build_program(cl_program program, void *user_data)
 	dlist_mutable_iter iter;
 	int		rc, index;
 
-	dlog("build done for clprog=%p", clprog);
-
 	Assert(program == clprog->program);
 	index = clprog_slot_hash(clprog->clcxt, clprog->kernel_md5)
 		% lengthof(clprog_slot);
@@ -206,10 +205,8 @@ clserv_cb_build_program(cl_program program, void *user_data)
 
 		dlist_delete(&chunk->chain);
 		clserv_enqueue_chunk(chunk);
-		dlog("chunk %p was enqueued again", chunk);
 	}
 	pthread_mutex_unlock(&clprog_lock[index]);
-	dlog("all the chunks on waitq of clprog (%p) were enqueued again", clprog);
 }
 
 static openclKernel *
@@ -227,12 +224,10 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	size_t			source_len[2];
 	char			build_opts[1024];
 	const char	   *device_type;
-	int				vector_width;
 
 	index = clprog_slot_hash(cldev->clcxt, kernel_md5)
 		% lengthof(clprog_slot);
 
-	dlog("start to construct kernel for chunk=%p", chunk);
 	if ((rc = pthread_mutex_lock(&clprog_lock[index])) != 0)
 	{
 		chunk_backq(chunk, ERRCODE_INTERNAL_ERROR,
@@ -330,7 +325,6 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 
 				pthread_mutex_unlock(&clprog_lock[index]);
 
-				dlog("chunk %p was enqueued clprog=%p waitq", chunk, clprog);
 				return NULL;
 			}
 			/*
@@ -392,16 +386,6 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	dlist_push_tail(&clprog_slot[index], &clprog->chain);
 
 	/*
-	 * NOTE: The reason why we don't kick clBuildProgram under clprog_lock
-	 * is that nvidia's driver don't launch asynchronous program building
-	 * even if callback was given, thus, its completion callback will be
-	 * invoked prior to return from clBuildProgram in this thread.
-	 * It also means the callback blocks forever when it tries to acquire
-	 * the same exclusive lock on same slot.
-	 */
-	pthread_mutex_unlock(&clprog_lock[index]);
-
-	/*
 	 * Set up program build options
 	 */
 	if (clprog->clcxt->dev_type == CL_DEVICE_TYPE_CPU)
@@ -418,37 +402,48 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	switch (chunk->kernel_params->vector_preference)
 	{
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_CHAR:
-			vector_width = clprog->clcxt->vec_width_char;
+			clprog->vector_width = clprog->clcxt->vec_width_char;
 			break;
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_SHORT:
-			vector_width = clprog->clcxt->vec_width_short;
+			clprog->vector_width = clprog->clcxt->vec_width_short;
 			break;
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_LONG:
-			vector_width = clprog->clcxt->vec_width_long;
+			clprog->vector_width = clprog->clcxt->vec_width_long;
 			break;
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_FLOAT:
-			vector_width = clprog->clcxt->vec_width_float;
+			clprog->vector_width = clprog->clcxt->vec_width_float;
 			break;
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_DOUBLE:
-			vector_width = clprog->clcxt->vec_width_double;
+			clprog->vector_width = clprog->clcxt->vec_width_double;
 			break;
 		case CL_DEVICE_PREFERRED_VECTOR_WIDTH_INT:
 		default:
-			vector_width = clprog->clcxt->vec_width_int;
+			clprog->vector_width = clprog->clcxt->vec_width_int;
 			break;
 	}
 	snprintf(build_opts, sizeof(build_opts),
 			 "-Werror -DSTROMCL_DEVICE_TYPE_%s -DSTROMCL_VECTOR_WIDTH=%u",
-			 device_type, vector_width);
-	dlog("build option of clprog=%p is '%s'", clprog, build_opts);
+			 device_type, clprog->vector_width);
 
+	/*
+	 * NOTE: The reason why we don't kick clBuildProgram under clprog_lock
+	 * is that nvidia's driver don't launch asynchronous program building
+	 * even if callback was given, thus, its completion callback will be
+	 * invoked prior to return from clBuildProgram in this thread.
+	 * It also means the callback blocks forever when it tries to acquire
+	 * the same exclusive lock on same slot.
+	 */
+	pthread_mutex_unlock(&clprog_lock[index]);
+
+	/*
+	 * Kick (probably) asynchronous build process
+	 */
 	rc = clBuildProgram(clprog->program,
 						0,
 						NULL,
 						build_opts,
 						clserv_cb_build_program,
 						clprog);
-	dlog("clBuildProgram of clprog=%p (%s)", clprog, opencl_strerror(rc));
 	if (rc != CL_SUCCESS)
 	{
 		cl_build_status		status;
@@ -529,6 +524,7 @@ clserv_cb_chunk_complete(cl_event event, cl_int ev_status, void *user_data)
 			goto cleanup;
 		}
 	}
+
 	/* OK, no events returned an error status */
 	chunk->is_running = false;
 	chunk->error_code = ERRCODE_SUCCESSFUL_COMPLETION;
@@ -554,28 +550,29 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 	Assert(cldev->prop.dev_host_unified_memory);
 
 	/* assign sub-buffer for kparams */
-	Assert((uintptr_t)kparams >= shmem_start &&
-		   (uintptr_t)kparams + kparams->kparams_size <= shmem_end);
-	region.origin = (uintptr_t)kparams - shmem_start;
+	Assert((uintptr_t)kparams->kparams >= shmem_start &&
+		   (uintptr_t)kparams->kparams + kparams->kparams_size <= shmem_end);
+	region.origin = (uintptr_t)kparams->kparams - shmem_start;
 	region.size = kparams->kparams_size;
 	temp  = clCreateSubBuffer(host_shmem,
-							  CL_MEM_READ_ONLY,
+							  CL_MEM_READ_WRITE,
 							  CL_BUFFER_CREATE_TYPE_REGION,
 							  &region,
 							  &rc);
 	if (rc != CL_SUCCESS)
 	{
 		chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-					"failed on clCreateSubBuffer (%s) offset = %lu",
-					opencl_strerror(rc), region.origin);
+					"failed on clCreateSubBuffer (%s) region=(%lu, %lu)",
+					opencl_strerror(rc), region.origin, region.size);
 		return false;
 	}
 	clkern->arg_kparams = temp;
 
 	/* assign sub-buffer of kargs */
-	Assert((uintptr_t)(chunk->data + chunk->dma_send_start) >= shmem_start &&
-		   (uintptr_t)(chunk->data + chunk->dma_recv_end) <= shmem_end);
-	region.origin = (uintptr_t)(chunk->data + chunk->dma_send_start);
+	Assert((uintptr_t)chunk->cb_kargs + chunk->dma_send_start >= shmem_start &&
+		   (uintptr_t)chunk->cb_kargs + chunk->dma_recv_end <= shmem_end);
+	region.origin = ((uintptr_t)chunk->cb_kargs +
+					 chunk->dma_send_start - shmem_start);
 	region.size = chunk->dma_recv_end - chunk->dma_send_start;
 	temp = clCreateSubBuffer(host_shmem,
 							 CL_MEM_READ_WRITE,
@@ -585,8 +582,8 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 	if (rc != CL_SUCCESS)
 	{
 		chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-					"failed on clCreateSubBuffer (%s)",
-					opencl_strerror(rc));
+					"failed on clCreateSubBuffer (%s) region=(%lu, %lu)",
+					opencl_strerror(rc), region.origin, region.size);
 		return false;
 	}
 	clkern->arg_kargs = temp;
@@ -646,7 +643,7 @@ clserv_alloc_device_memory(openclKernel *clkern)
 	Assert(!cldev->prop.dev_host_unified_memory);
 
 	temp = clCreateBuffer(context,
-						  CL_MEM_READ_ONLY,
+						  CL_MEM_READ_WRITE,
 						  kparams->kparams_size,
 						  NULL,
 						  &rc);
@@ -686,7 +683,7 @@ clserv_alloc_device_memory(openclKernel *clkern)
 			if (i_vlbuf == 0)
 			{
 				temp = clCreateBuffer(context,
-									  CL_MEM_READ_ONLY,
+									  CL_MEM_READ_WRITE,
 									  chunk->varlena_sz,
 									  NULL,
 									  &rc);
@@ -759,7 +756,7 @@ clserv_enqueue_dma_send(openclKernel *clkern)
 							  CL_FALSE,
 							  0,
 							  chunk->dma_send_end - chunk->dma_send_start,
-							  chunk->cb_kargs,
+							  (char *)chunk->cb_kargs + chunk->dma_send_start,
 							  0,
 							  NULL,
 							  clkern->events + clkern->n_events);
@@ -837,14 +834,13 @@ clserv_enqueue_dma_recv(openclKernel *clkern)
 	/* should not be first */
 	Assert(clkern->n_events > 0);
 
-	offset = (uintptr_t)(chunk->data + chunk->dma_recv_start)
-		   - (uintptr_t)chunk->cb_kargs;
+	offset = chunk->dma_recv_start - chunk->dma_send_start;
 	rc = clEnqueueReadBuffer(cldev->cmdq,
 							 clkern->arg_kargs,
 							 CL_FALSE,
 							 offset,
 							 chunk->dma_recv_end - chunk->dma_recv_start,
-							 chunk->data + chunk->dma_recv_start,
+							 (char *)chunk->cb_kargs + chunk->dma_recv_start,
 							 1,
 							 clkern->events + clkern->n_events - 1,
 							 clkern->events + clkern->n_events);
@@ -860,6 +856,54 @@ clserv_enqueue_dma_recv(openclKernel *clkern)
 	return true;
 }
 
+/*
+ * clserv_enqueue_completion_marker
+ *
+ * In case when opencl device supports host unified memory, it does not
+ * take enqueuing dma-recv event being also used for synchronization of
+ * all the kernel execution. Note that here is no guarantee the kernel
+ * last enqueued is completed last if chunk has multiple varlena buffers.
+ * So, clserv_cb_chunk_complete has to be called as callback of this
+ * completion marker.
+ */
+static bool
+clserv_enqueue_completion_marker(openclKernel *clkern)
+{
+	openclDevice   *cldev = clkern->cldev;
+	cl_int			rc;
+
+#ifdef CL_VERSION_1_2
+	rc = clEnqueueMarkerWithWaitList(cldev->cmdq,
+									 clkern->n_events,
+									 clkern->events,
+									 clkern->events + clkern->n_events);
+	if (rc != CL_SUCCESS)
+	{
+		clWaitForEvents(clkern->n_events, clkern->events);
+		chunk_backq(clkern->chunk, ERRCODE_INTERNAL_ERROR,
+					"failed on clEnqueueMarkerWithWaitList(%s)",
+					opencl_strerror(rc));
+		return false;
+	}
+#else
+	/*
+	 * clEnqueueMarker was deprecated at OpenCL 1.2, so newer runtime
+	 * should use clEnqueueMarkerWithWaitList instead.
+	 */
+	rc = clEnqueueMarker(cldev->cmdq, clkern->events + clkern->n_events);
+	if (rc != CL_SUCCESS)
+	{
+		clWaitForEvents(clkern->n_events, clkern->events);
+		chunk_backq(clkern->chunk, ERRCODE_INTERNAL_ERROR,
+					"failed on clEnqueueMarker(%s)",
+					opencl_strerror(rc));
+		return false;
+	}
+#endif
+	clkern->n_events++;
+	return true;
+}
+
 static bool
 clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 						   cl_int offset, cl_int nitems)
@@ -871,13 +915,14 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	size_t			wkgrp_maxsz;
 	size_t			wkgrp_unitsz;
 	char			errmsg[1024];
+	cl_int			vector_width = clkern->clprog->vector_width;
 	cl_int			rc;
 
 	/* arg[0] : __global kern_params_t *kparams */
 	rc = clSetKernelArg(clkern->kernels[index],
 						0,
 						sizeof(cl_mem),
-						clkern->arg_kparams);
+						&clkern->arg_kparams);
 	if (rc != CL_SUCCESS)
 	{
 		snprintf(errmsg, sizeof(errmsg),
@@ -890,7 +935,7 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	rc = clSetKernelArg(clkern->kernels[index],
 						1,
 						sizeof(cl_mem),
-						clkern->arg_kargs);
+						&clkern->arg_kargs);
 	if (rc != CL_SUCCESS)
 	{
 		snprintf(errmsg, sizeof(errmsg),
@@ -903,7 +948,7 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	rc = clSetKernelArg(clkern->kernels[index],
 						2,
 						sizeof(cl_mem),
-						clkern->arg_vlbufs[index]);
+						&clkern->arg_vlbufs[index]);
 	if (rc != CL_SUCCESS)
 	{
 		snprintf(errmsg, sizeof(errmsg),
@@ -916,7 +961,7 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	rc = clSetKernelArg(clkern->kernels[index],
 						3,
 						sizeof(cl_mem),
-						clkern->arg_wkmem);
+						&clkern->arg_wkmem);
 	if (rc != CL_SUCCESS)
 	{
 		snprintf(errmsg, sizeof(errmsg),
@@ -971,14 +1016,16 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 		wkgrp_local[0] = wkgrp_unitsz;
 		wkgrp_local[1] = wkgrp_maxsz / wkgrp_unitsz;
 		wkgrp_global[0] = wkgrp_local[0];
-		wkgrp_global[1] = (nitems + wkgrp_local[1] - 1) / wkgrp_local[1];
+		wkgrp_global[1] = ((nitems / vector_width + wkgrp_local[1] - 1)
+						   / wkgrp_local[1]) * wkgrp_local[1];
 	}
 	else
 	{
 		wkgrp_local[0] = wkgrp_maxsz;
 		wkgrp_local[1] = 1;
-		wkgrp_global[0] = (wkgrp_unitsz + wkgrp_maxsz - 1) / wkgrp_maxsz;
-		wkgrp_global[1] = nitems;
+		wkgrp_global[0] = ((wkgrp_unitsz + wkgrp_maxsz - 1)
+						   / wkgrp_maxsz) * wkgrp_maxsz;
+		wkgrp_global[1] = nitems / vector_width;
 	}
 
 	/*
@@ -991,7 +1038,20 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 	 * have asynchronous DMA transfer during kernel execution on the
 	 * previous buffer!
 	 */
-	if (index == 0)
+	if (cldev->prop.dev_host_unified_memory)
+	{
+		rc = clEnqueueNDRangeKernel(cldev->cmdq,
+									clkern->kernels[index],
+									2,	/* 2D-matrix */
+									wkgrp_offset,
+									wkgrp_global,
+									wkgrp_local,
+									0,
+									NULL,
+									clkern->events + clkern->n_events);
+	}
+	else if (index == 0)
+	{
 		rc = clEnqueueNDRangeKernel(cldev->cmdq,
 									clkern->kernels[index],
 									2,	/* 2D-matrix */
@@ -1001,7 +1061,9 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 									clkern->n_events,
 									clkern->events,
 									clkern->events + clkern->n_events);
+	}
 	else
+	{
 		rc = clEnqueueNDRangeKernel(cldev->cmdq,
 									clkern->kernels[index],
 									2,	/* 2D-matrix */
@@ -1011,6 +1073,8 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 									1,
 									clkern->events + clkern->n_events - 1,
 									clkern->events + clkern->n_events);
+	}
+
 	if (rc != CL_SUCCESS)
     {
         snprintf(errmsg, sizeof(errmsg),
@@ -1055,7 +1119,6 @@ clserv_worker_main(void *dummy)
 		if (!dnode)
 			continue;
 		chunk = dlist_container(ChunkBuffer, chain, dnode);
-		dlog("dequeue chunk (%p)", chunk);
 
 		/* check status of chunk buffer */
 		Assert(chunk->is_loaded || chunk->nitems == 0);
@@ -1063,8 +1126,6 @@ clserv_worker_main(void *dummy)
 
 		/* choose an appropriate device */
 		cldev = clserv_device_scheduler(chunk);
-		dlog("device %s was scheduled on chunk (%p)",
-			 !cldev ? "(null)" : cldev->prop.dev_name, chunk);
 		if (!cldev)
 			continue;
 
@@ -1077,7 +1138,6 @@ clserv_worker_main(void *dummy)
 		 * to the request queue again.
 		 */
 		clkern = clserv_create_kernel(cldev, chunk);
-		dlog("clkern = %p on chunk (%p)", clkern, chunk);
 		if (!clkern)
 			continue;
 
@@ -1141,7 +1201,9 @@ clserv_worker_main(void *dummy)
 			}
 		}
 
-		if (!unified_memory && !clserv_enqueue_dma_recv(clkern))
+		if (!unified_memory ?
+			!clserv_enqueue_dma_recv(clkern) :
+			!clserv_enqueue_completion_marker(clkern))
 			goto error_cleanup;
 
 		Assert(clkern->n_events > 0);

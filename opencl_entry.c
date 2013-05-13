@@ -711,15 +711,28 @@ static cl_int (*p_clEnqueueNativeKernel)(
 	cl_uint num_events_in_wait_list,
 	const cl_event *event_wait_list,
 	cl_event *event) = NULL;
+#ifdef CL_VERSION_1_2
+static cl_int (*p_clEnqueueMarkerWithWaitList)(
+	cl_command_queue  command_queue,
+	cl_uint  num_events_in_wait_list,
+	const cl_event  *event_wait_list,
+	cl_event *event) = NULL;
+static cl_int (*p_clEnqueueBarrierWithWaitList)(
+	cl_command_queue  command_queue,
+	cl_uint  num_events_in_wait_list,
+	const cl_event  *event_wait_list ,
+	cl_event  *event) = NULL;
+#else
 static cl_int (*p_clEnqueueMarker)(
 	cl_command_queue command_queue,
 	cl_event *event) = NULL;
+static cl_int (*p_clEnqueueBarrier)(
+	cl_command_queue command_queue) = NULL;
 static cl_int (*p_clEnqueueWaitForEvents)(
 	cl_command_queue command_queue,
 	cl_uint num_events,
 	const cl_event *event_list) = NULL;
-static cl_int (*p_clEnqueueBarrier)(
-	cl_command_queue command_queue) = NULL;
+#endif
 
 cl_int
 clEnqueueNDRangeKernel(cl_command_queue command_queue,
@@ -784,12 +797,46 @@ clEnqueueNativeKernel(cl_command_queue command_queue,
 									  event);
 }
 
+#ifdef CL_VERSION_1_2
+cl_int
+clEnqueueMarkerWithWaitList(cl_command_queue command_queue,
+							cl_uint num_events_in_wait_list,
+							const cl_event *event_wait_list,
+							cl_event *event)
+{
+	Assert(p_clEnqueueMarkerWithWaitList != NULL);
+	return (*p_clEnqueueMarkerWithWaitList)(command_queue,
+											num_events_in_wait_list,
+											event_wait_list,
+											event);
+}
+
+cl_int
+clEnqueueBarrierWithWaitList(cl_command_queue command_queue,
+							 cl_uint num_events_in_wait_list,
+							 const cl_event *event_wait_list,
+							 cl_event *event)
+{
+	Assert(p_clEnqueueBarrierWithWaitList != NULL);
+	return (*p_clEnqueueBarrierWithWaitList)(command_queue,
+											 num_events_in_wait_list,
+											 event_wait_list,
+											 event);
+}
+#else
 cl_int
 clEnqueueMarker(cl_command_queue command_queue,
 				cl_event *event)
 {
 	Assert(p_clEnqueueMarker != NULL);
 	return (*p_clEnqueueMarker)(command_queue, event);
+}
+
+cl_int
+clEnqueueBarrier(cl_command_queue command_queue)
+{
+	Assert(p_clEnqueueBarrier != NULL);
+	return (*p_clEnqueueBarrier)(command_queue);
 }
 
 cl_int
@@ -802,13 +849,7 @@ clEnqueueWaitForEvents(cl_command_queue command_queue,
 									   num_events,
 									   event_list);
 }
-
-cl_int
-clEnqueueBarrier(cl_command_queue command_queue)
-{
-	Assert(p_clEnqueueBarrier != NULL);
-	return (*p_clEnqueueBarrier)(command_queue);
-}
+#endif
 
 /*
  * Event Objects
@@ -1030,9 +1071,14 @@ pgstrom_opencl_entry_init(void)
 		LOOKUP_OPENCL_FUNCTION(clEnqueueNDRangeKernel);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueTask);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueNativeKernel);
+#ifdef CL_VERSION_1_2
+		LOOKUP_OPENCL_FUNCTION(clEnqueueMarkerWithWaitList);
+		LOOKUP_OPENCL_FUNCTION(clEnqueueBarrierWithWaitList);
+#else
 		LOOKUP_OPENCL_FUNCTION(clEnqueueMarker);
-		LOOKUP_OPENCL_FUNCTION(clEnqueueWaitForEvents);
 		LOOKUP_OPENCL_FUNCTION(clEnqueueBarrier);
+		LOOKUP_OPENCL_FUNCTION(clEnqueueWaitForEvents);
+#endif
 		/* Event Objects */
 		LOOKUP_OPENCL_FUNCTION(clCreateUserEvent);
 		LOOKUP_OPENCL_FUNCTION(clSetUserEventStatus);

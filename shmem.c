@@ -692,7 +692,7 @@ pgstrom_chunk_buffer_free(ChunkBuffer *chunk)
 	Assert(block->pid == getpid());
 
 	/*
-	 * NOTE: it does not care about local memory on rs_memcxt and rs_cache;
+	 * NOTE: it does not care about local memory on rs_memcxt and rs_cache
 	 * these shall be released by caller, or error cleanup callback.
 	 * Usually, these are acquired on per-query memory context, thus, these
 	 * objects are released automatically.
@@ -705,7 +705,7 @@ pgstrom_chunk_buffer_free(ChunkBuffer *chunk)
 		VarlenaBuffer  *vlbuf
 			= dlist_container(VarlenaBuffer, chain, iter.cur);
 
-		pgstrom_varlena_buffer_free(vlbuf);
+	   pgstrom_varlena_buffer_free(vlbuf);
 	}
 
 	/* untrack this block in private tracker */
@@ -1413,16 +1413,24 @@ pgstrom_shmem_startup(void)
 {
 	ShmemBlock *block;
 	Size		segment_sz = (pgstrom_shmem_size << 20);
+	Size		page_sz = sysconf(_SC_PAGESIZE);
+	void	   *temp;
 	bool		found;
 
 	/* call the startup hook */
 	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
+ 		(*shmem_startup_hook_next)();
 
 	/* acquire shared memory segment */
-	pgstrom_shmem_head = ShmemInitStruct("shared memory segment of PG-Strom",
-										 segment_sz, &found);
+	temp = ShmemInitStruct("PG-Strom shared memory segment",
+					   segment_sz + page_sz, &found);
+
+	pgstrom_shmem_head = (ShmemHead *)TYPEALIGN(page_sz, temp);
 	Assert(!found);
+
+	elog(LOG, "PG-Strom shared memory segment: %p-%p",
+		 pgstrom_shmem_head,
+		 (char *)pgstrom_shmem_head + segment_sz);
 
 	/* init ShmemHead field */
 	pgstrom_shmem_head->total_size

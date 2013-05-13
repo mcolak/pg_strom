@@ -197,7 +197,7 @@ typedef double		double_v;
 		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
-		__global char *kvlbuf)										\
+		__global kern_vlbuf_t *kvlbuf)								\
 	{																\
 		pg_##NAME##_v result;										\
 		__global BASE *p_values;									\
@@ -224,7 +224,7 @@ typedef double		double_v;
 		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
-		__global char *kvlbuf)										\
+		__global kern_vlbuf_t *kvlbuf)								\
 	{																\
 		pg_##NAME##_v result;										\
 		__global BASE *p_values;									\
@@ -266,7 +266,7 @@ typedef double		double_v;
 		__private int attidx,										\
 		__private int rowidx,										\
 		__global kern_args_t *kargs,								\
-		__global char *kvlbuf)										\
+		__global kern_vlbuf_t *kvlbuf)								\
 	{																\
 		pg_##NAME##_v ret;											\
 		__global varlena *p_values;									\
@@ -416,7 +416,7 @@ typedef double		double_v;
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)
 
 /* misc definitions */
-#define ROWMAP_BASE(kargs)						\
+#define ROWMAP_BASE(kargs)							\
 	(((__global char *)(kargs)) + (kargs)->offset[(kargs)->i_rowmap].values)
 
 #endif	/* STROMCL_VECTOR_WIDTH */

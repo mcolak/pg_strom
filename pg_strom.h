@@ -50,9 +50,9 @@
 #define Inum_pg_strom_rs_oid		1
 
 /*
- * NOTE: we assume *every* chunk has aligned number of items,
- * even if nitems is less than PGSTROM_CHUNK_SIZE, to ensure
- * vectore load / store operation is safe to access.
+ * NOTE: we assume *every* chunk has aligned number of items, even if
+ * nitems is less than PGSTROM_UNITSZ, to ensure vectore load / store
+ * operation is safe to access.
  * 
  * things to be considers:
  * - Nvidia has idea of warp that runs 32 of concurrent thread in parallel,
@@ -62,6 +62,7 @@
  *   to ensure vload / vstore working safety.
  */
 #define PGSTROM_UNITSZ			32
+
 #define PGSTROM_CHUNK_SIZE								\
 	((MaximumBytesPerTuple(1)							\
 	  - MAXALIGN(offsetof(HeapTupleHeaderData, t_bits))	\
@@ -78,6 +79,11 @@
 				  - sizeof(int32)									\
 				  - VARHDRSZ										\
 				  - VARHDRSZ)
+/*
+ * Unlike TYPEALIGN[_DOWN], it is safe for ALIGN being not a power of 2
+ */
+#define PGSTROM_ALIGN(ALIGN,LEN)			\
+	((((intptr_t)(LEN) + (ALIGN) - 1) / (ALIGN)) * (ALIGN))
 
 #define PGSTROM_ROWID_MIN	\
 	(PGSTROM_CHUNK_SIZE * ((0x100000000ULL / PGSTROM_CHUNK_SIZE) + 1))
@@ -125,6 +131,7 @@ typedef struct {
 	FormData_pg_attribute *cb_attrs;
 	kern_args_t	   *cb_kargs;
 	int				error_code;	/* execute status */
+	uint32			cb_length;
 
 	HeapTuple	   *rs_cache;	/* !!private!! array for cache of row-store */
 	MemoryContext	rs_memcxt;	/* !!private!! memory for cache of row-store */

@@ -239,15 +239,18 @@ extract_kernel_params(EState *estate,
 	 */
 	result = pgstrom_kernel_params_alloc(sizeof(KernelParams) +
 										 VARSIZE(kernel_source) +
+										 pgstrom_base_addr_align +
 										 MAXALIGN(str.len), true);
 	memcpy(result->kernel_md5, VARDATA(kernel_md5), MD5_SIZE);
 	memcpy(&result->kernel_source,
 		   kernel_source,
 		   VARSIZE(kernel_source));
-	result->kparams = (kern_params_t *)(((char *)result) +
-										offsetof(KernelParams,
-												 kernel_source) +
-										VARSIZE(kernel_source));
+	result->kparams =
+		(kern_params_t *)TYPEALIGN(pgstrom_base_addr_align,
+								   (intptr_t)result +
+								   offsetof(KernelParams,
+											kernel_source) +
+								   VARSIZE(kernel_source));
 	memcpy(result->kparams, kparams, str.len);
 	result->kparams_size = str.len;
 
@@ -317,28 +320,28 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	 * || void   *cb_values[nattrs]   |
 	 * || FormData_pg_attribute       |
 	 * ||         cb_attrs[nargs]     |
-	 * || <---- (char *)chunk->data + dma_send_start ---+
-	 * || kern_args_t  kargs          |                 |
-	 * ||        :                    |                 |
-	 * || Fields to be sent to the    |                 |
-	 * || device as input of kernel   |                 |
-	 * || execution                   |                 |
-	 * ||        :                    |                 |
-	 * || <-- (char *)chunk->data + dma_recv_start --+  |
-	 * || bool  cb_rowmap[nitems]     |              |  |
-	 * || <------------------------------------------|--+
-	 * ||        :                    |              |
-	 * || Fields to be received from  |              |
-	 * || the device as output of     |              |
-	 * || kernel execution            |              |
-	 * ||        :                    |              |
-	 * ++-----------------------------+ <------------+
+	 * || <---- (char *)chunk->cb_kargs + dma_send_start --+
+	 * || kern_args_t  kargs          |                    |
+	 * ||        :                    |                    |
+	 * || Fields to be sent to the    |                    |
+	 * || device as input of kernel   |                    |
+	 * || execution                   |                    |
+	 * ||        :                    |                    |
+	 * || <-- (char *)chunk->cb_kargs + dma_recv_start --+ |
+	 * || bool  cb_rowmap[nitems]     |                  | |
+	 * || <------------------------------------------------+
+	 * ||        :                    |                  |
+	 * || Fields to be received from  |                  |
+	 * || the device as output of     |                  |
+	 * || kernel execution            |                  |
+	 * ||        :                    |                  |
+	 * ++-----------------------------+ <----------------+
 	 */
 	memset(chunk->cb_isnull, 0, sizeof(bool *) * tupdesc->natts);
 	memset(chunk->cb_values, 0, sizeof(void *) * tupdesc->natts);
 
-	chunk->dma_send_start = ((char *)kargs) - chunk->data;
-	offset = ((char *)&kargs->offset[kargs->nargs]) - chunk->data;
+	chunk->dma_send_start = 0;
+	offset = offsetof(kern_args_t, offset[kargs->nargs]);
 
 	index = 0;
 	foreach (cell, sestate->kernel_cols)
@@ -353,16 +356,16 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 			kargs->offset[index].isnull = 0;	/* always not null */
 		else
 		{
-			offset = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ, offset);
+			offset = PGSTROM_ALIGN(sizeof(bool) * PGSTROM_UNITSZ, offset);
 			kargs->offset[index].isnull = offset;
-			chunk->cb_isnull[j] = (bool *)(chunk->data + offset);
+			chunk->cb_isnull[j] = (bool *)((char *)kargs + offset);
 			offset += sizeof(bool) * nitems;
 		}
 
 		unitlen = attr->attlen > 0 ? attr->attlen : sizeof(uint32);
-		offset = TYPEALIGN(unitlen * PGSTROM_UNITSZ, offset);
+		offset = PGSTROM_ALIGN(unitlen * PGSTROM_UNITSZ, offset);
 		kargs->offset[index].values = offset;
-		chunk->cb_values[j] = (void *)(chunk->data + offset);
+		chunk->cb_values[j] = (void *)((char *)kargs + offset);
 		offset += unitlen * nitems;
 
 		index++;
@@ -373,7 +376,7 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	offset = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ, offset);
 	kargs->offset[index].isnull = 0;
 	kargs->offset[index].values = offset;
-	chunk->cb_rowmap = (bool *)(chunk->data + offset);
+	chunk->cb_rowmap = (bool *)((char *)kargs + offset);
 	offset += sizeof(bool) * nitems;
 	chunk->dma_send_end = offset;
 	index++;
@@ -382,6 +385,9 @@ refresh_chunk_buffer(StromExecState *sestate, ChunkBuffer *chunk,
 	 */
 	chunk->dma_recv_end = offset;
 	Assert(kargs->nargs == index);
+
+	Assert((uintptr_t)chunk->cb_kargs + offset
+		   <= (uintptr_t)chunk + chunk->cb_length);
 
 	kargs->nargs = index;
 	kargs->nitems = nitems;
@@ -437,10 +443,6 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	 */
 	Assert(nrecv == 0);
 
-	/* For rowid map */
-	length = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ,
-					   sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
-
 	/* For kernel arguments */
 	foreach (cell, sestate->kernel_cols)
 	{
@@ -450,15 +452,18 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 		attr = tupdesc->attrs[j];
 
 		if (!attr->attnotnull)
-			length = TYPEALIGN(sizeof(bool) * PGSTROM_UNITSZ,
-							   sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
+			length = PGSTROM_ALIGN(sizeof(bool) * PGSTROM_UNITSZ,
+								sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
 		if (attr->attlen > 0)
-			length = TYPEALIGN(attr->attlen * PGSTROM_UNITSZ,
-							   attr->attlen * PGSTROM_CHUNK_SIZE + length);
+			length = PGSTROM_ALIGN(attr->attlen * PGSTROM_UNITSZ,
+								attr->attlen * PGSTROM_CHUNK_SIZE + length);
 		else
-			length = TYPEALIGN(sizeof(uint32) * PGSTROM_UNITSZ,
-							   sizeof(uint32) * PGSTROM_CHUNK_SIZE + length);
+			length = PGSTROM_ALIGN(sizeof(uint32) * PGSTROM_UNITSZ,
+								sizeof(uint32) * PGSTROM_CHUNK_SIZE + length);
 	}
+	/* For rowmap */
+	length = PGSTROM_ALIGN(sizeof(bool) * PGSTROM_UNITSZ,
+						   sizeof(bool) * PGSTROM_CHUNK_SIZE + length);
 
 	/*
 	 * Allocation on the shared memory segment
@@ -466,6 +471,7 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	chunk = pgstrom_chunk_buffer_alloc(length, abort_on_error);
 	if (!chunk)
 		return NULL;
+	chunk->cb_length = length;
 
 	/*
 	 * Initialization of persistent fields independent from rowid and
@@ -520,12 +526,11 @@ create_chunk_buffer(StromExecState *sestate, bool abort_on_error)
 	 * it may be used to opencl memory buffer if device supports host
 	 * unified memory.
 	 */
-	offset = TYPEALIGN(pgstrom_base_addr_align,
-					   chunk->data + offset) - (intptr_t)(chunk->data);
-	chunk->cb_kargs = (kern_args_t *)(chunk->data + offset);
+	chunk->cb_kargs = (kern_args_t *)PGSTROM_ALIGN(pgstrom_base_addr_align,
+												   chunk->data + offset);
 	chunk->cb_kargs->nargs = nargs;
 	chunk->cb_kargs->nitems = -1;		/* to be set later */
-	chunk->cb_kargs->i_rowmap = nsend;	/* right now, always 0 */
+	chunk->cb_kargs->i_rowmap = nsend;
 
 	return chunk;
 }
@@ -1371,7 +1376,7 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 	if (nitems == 0)
 		return false;
 	/* expand nitems to the alignment size of PGSTROM_UNITSZ */
-	nitems_ex = (nitems + PGSTROM_UNITSZ - 1) & ~(PGSTROM_UNITSZ - 1);
+	nitems_ex = TYPEALIGN(PGSTROM_UNITSZ, nitems);
 	Assert(nitems_ex <= PGSTROM_CHUNK_SIZE);
 
 	/* to avoid rowid == 0, using PGSTROM_CHUNK_SIZE instead */
@@ -1408,7 +1413,7 @@ pgstrom_load_row_store(StromExecState *sestate, ChunkBuffer *chunk)
 		{
 			rs_value = fastgetattr(chunk->rs_cache[i],
 								   attnum, tupdesc, &rs_isnull);
-			cb_isnull[i] = rs_isnull;
+			cb_isnull[i] = (rs_isnull ? -1 : 0);
 			if (attr->attbyval)
 				store_att_byval(cb_values + attr->attlen * i,
 								rs_value, attr->attlen);
@@ -1626,7 +1631,8 @@ pgstrom_getnext(StromExecState *sestate, TupleTableSlot *slot)
 				default:	/* STROMCL_ERRCODE_INTERNAL */
 					ereport(ERROR,
 							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("opencl server internal error")));
+						errmsg("opencl server internal error (code: %d)",
+							   rowmap)));
 					break;
 			}
 		}
@@ -1853,6 +1859,7 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				 ? pgstrom_load_column_rowmap(sestate, chunk)
 				 : pgstrom_load_row_store(sestate, chunk)))
 			{
+				elog(INFO, "in rowmap = %016lx", ((uint64 *)chunk->cb_rowmap)[0]);
 				/*
 				 * XXX - right now, kernel-execution is not implemented
 				 * yet. So, we simply add it to ready_list.
@@ -1920,6 +1927,8 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		dnode = dlist_pop_head_node(&sestate->chunk_ready_list);
 		sestate->curr_chunk = dlist_container(ChunkBuffer, chain, dnode);
 		sestate->curr_index = 0;
+
+		elog(INFO, "out rowmap = %016lx", ((uint64 *)sestate->curr_chunk->cb_rowmap)[0]);
 
 		/*
 		 * Acquire tuple-level lock, if needed. In case when this chunk

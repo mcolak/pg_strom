@@ -1576,8 +1576,9 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		"\n"
 		"  rmap = pg_vload(get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"  result = (%s);\n"
-		"  rmap |= (!rmap & (!!result.isnull | !result.value) &\n"
-		"           STROMCL_ERRCODE_ROW_MASKED);\n"
+		"  rmap |= (rmap == (char)0) &\n"
+		"          (result.isnull != (char)0 | result.value == (char)0) &\n"
+		"          STROMCL_ERRCODE_ROW_MASKED;\n"
 		"  pg_vstore(rmap, get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"}\n",
 		has_varlena ? "kvlbuf" : "kargs",
