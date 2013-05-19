@@ -21,15 +21,26 @@
 #include "storage/proc.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
+#include <time.h>
 
-/* DEBUG messages */
-#if 1
+/* debug messages */
 #define dlog(fmt,...)											\
-	fprintf(stderr, "clserv(worker:%03lu, %s:%d) : " fmt "\n",	\
-			clserv_worker_index,  __FUNCTION__, __LINE__, ##__VA_ARGS__)
-#else
-#define dlog(fmt,...)
-#endif
+	do {														\
+		if (enable_pgstrom_debug)								\
+		{														\
+			struct timeval tv;									\
+			struct tm t;										\
+																\
+			gettimeofday(&tv, NULL);							\
+			localtime_r(&tv.tv_sec, &t);						\
+			fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d "	\
+					"clserv[worker:%03lu, %s:%d] : " fmt "\n",	\
+					t.tm_year, t.tm_mon+1, t.tm_mday,			\
+					t.tm_hour, t.tm_mon, t.tm_sec,				\
+					clserv_worker_index, __FUNCTION__, __LINE__,\
+					##__VA_ARGS__);								\
+		}														\
+	} while(0)
 
 #define MAX_OPENCL_PLATFORMS	16
 #define MAX_OPENCL_DEVICES		64
@@ -111,6 +122,7 @@ typedef struct {
 static bool 		clserv_running = true;
 static __thread uintptr_t clserv_worker_index;
 static int			clserv_num_workers;
+static char		   *clserv_opencl_devices;
 static openclDevice	*cldev_slot[MAX_OPENCL_DEVICES];
 static int			cldev_nums;
 static pthread_mutex_t clprog_lock[CLPROGRAM_SLOT_SIZE];
@@ -131,6 +143,10 @@ static const char  *opencl_strerror(cl_int errcode);
 			chunk_elog(chunk, fmt, ##__VA_ARGS__);				\
 		pgstrom_chunk_buffer_return((chunk), (error_code));		\
 	} while(0)
+
+#define AssertOnShmem(addr)					   \
+	Assert((uintptr_t)(addr) >= shmem_start && \
+		   (uintptr_t)(addr) <= shmem_end)
 
 /*
  * clserv_device_scheduler
@@ -528,6 +544,7 @@ clserv_cb_chunk_complete(cl_event event, cl_int ev_status, void *user_data)
 	/* OK, no events returned an error status */
 	chunk->is_running = false;
 	chunk->error_code = ERRCODE_SUCCESSFUL_COMPLETION;
+	AssertOnShmem(chunk->recvq);
 	pgstrom_queue_enqueue(chunk->recvq, &chunk->chain);
 
 cleanup:
@@ -1028,6 +1045,14 @@ clserv_enqueue_kernel_exec(openclKernel *clkern, int index,
 		wkgrp_global[1] = nitems / vector_width;
 	}
 
+	dlog("clEnqueueNDRangeKernel : device='%s', nitems=%d, vector-width %d, "
+		 "global-offset {%lu,%lu}, global-size {%lu,%lu}, "
+		 "local-size {%lu,%lu}",
+		 cldev->prop.dev_name, nitems, vector_width,
+		 wkgrp_offset[0], wkgrp_offset[1],
+		 wkgrp_global[0], wkgrp_global[1],
+		 wkgrp_local[0], wkgrp_local[1]);
+
 	/*
 	 * If index == 0, it has to wait for completion of asynchronous DMA
 	 * transfer of kparams, kargs and vlbuf, to launch kernel execution.
@@ -1224,6 +1249,66 @@ clserv_worker_main(void *dummy)
 		clserv_release_kernel(clkern);
 	}
 	return NULL;
+}
+
+/*
+ * is_available_opencl_device
+ *
+ * it checks whether the supplied opencl device matches the configured
+ * "clserv_opencl_devices" being listed up.
+ */
+static bool
+is_available_opencl_device(openclDevice *cldev)
+{
+	static int	device_index = 0;
+	char	   *copy;
+	char	   *tok;
+	char	   *pos;
+
+
+	cldev->prop.index = ++device_index;
+
+	copy = strdup(clserv_opencl_devices);
+	if (!copy)
+		elog(ERROR, "out of memory");
+	tok = strtok_r(copy, " \t", &pos);
+	while (tok != NULL)
+	{
+		if (strcasecmp(tok, "all") == 0)
+			goto out_ok;
+		else if (strcasecmp(tok, "cpu") == 0)
+		{
+			if ((cldev->prop.dev_type & CL_DEVICE_TYPE_CPU) != 0)
+				goto out_ok;
+		}
+		else if (strcasecmp(tok, "gpu") == 0)
+		{
+			if ((cldev->prop.dev_type & CL_DEVICE_TYPE_GPU) != 0)
+				goto out_ok;
+		}
+		else if (strcasecmp(tok, "accelerator") == 0)
+		{
+			if ((cldev->prop.dev_type & CL_DEVICE_TYPE_ACCELERATOR) != 0)
+				goto out_ok;
+		}
+		else
+		{
+			int		index = atoi(tok);
+
+			if (index < 1 || errno != 0)
+				elog(ERROR, "pg_strom.opencl_devices has to be either "
+					 "cpu, gpu, accelerator or index number: %s", tok);
+			if (index == cldev->prop.index)
+				goto out_ok;
+		}
+		tok = strtok_r(NULL, " \t", &pos);
+	}
+	free(copy);
+	return false;
+
+out_ok:
+	free(copy);
+	return true;
 }
 
 /*
@@ -1484,6 +1569,11 @@ construct_opencl_device(cl_platform_id platform_id, cl_device_id device_id)
 			 cldev->prop.dev_name);
 		goto out_clean;
 	}
+
+	/* is it an opencl device to be used? */
+	if (!is_available_opencl_device(cldev))
+		goto out_clean;
+
 	/* put copy on shared memory segment */
 	cldev->shmcopy = pgstrom_device_property_alloc(&cldev->prop, true);
 
@@ -1817,6 +1907,14 @@ pgstrom_opencl_server_init(void)
 							PGC_SIGHUP,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.opencl_devices",
+							   "list of opencl devices to be used",
+							   NULL,
+							   &clserv_opencl_devices,
+							   "cpu",
+							   PGC_SIGHUP,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 
 	/* set up background worker process */
 	worker.bgw_name = "PG-Strom OpenCL Server";

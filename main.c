@@ -16,10 +16,14 @@
 #include "fmgr.h"
 #include "foreign/foreign.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
 #include "utils/rel.h"
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;
+
+/* GUC variable of pgstrom.debug */
+bool	enable_pgstrom_debug;
 
 /*
  * Local declarations
@@ -97,6 +101,16 @@ _PG_init(void)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
+
+	/* Control flag of debug information of PG-Strom */
+	DefineCustomBoolVariable("pg_strom.debug",
+							 "Logs debug information of PG-Strom",
+							 NULL,
+							 &enable_pgstrom_debug,
+							 false,
+							 PGC_SIGHUP,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	/* Initialize shared memory management */
 	pgstrom_shmem_init();

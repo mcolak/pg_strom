@@ -240,6 +240,7 @@ typedef double		double_v;
 		}															\
 		p_values = (__global BASE *)(((__global char *)kargs) +		\
 									 kargs->offset[attidx].values);	\
+		rowidx *= STROMCL_VECTOR_WIDTH;								\
 		IF_VEC01(result.value.s0 = p_values[rowidx++]);				\
 		IF_VEC02(result.value.s1 = p_values[rowidx++]);				\
 		IF_VEC04(result.value.s2 = p_values[rowidx++]);				\
@@ -283,6 +284,7 @@ typedef double		double_v;
 		}															\
 		p_offset = (__global BASE *)(((__global char *)kargs) +		\
 									 kargs->offset[attidx.values]);	\
+		rowidx *= STROMCL_VECTOR_WIDTH;								\
 		IF_VEC01(ret.value.s0 = __VARLENA(kvlbuf, p_offset[rowidx + 0])); \
 		IF_VEC02(ret.value.s1 = __VARLENA(kvlbuf, p_offset[rowidx + 1])); \
 		IF_VEC04(ret.value.s2 = __VARLENA(kvlbuf, p_offset[rowidx + 2])); \

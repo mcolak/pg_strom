@@ -1859,7 +1859,6 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 				 ? pgstrom_load_column_rowmap(sestate, chunk)
 				 : pgstrom_load_row_store(sestate, chunk)))
 			{
-				elog(INFO, "in rowmap = %016lx", ((uint64 *)chunk->cb_rowmap)[0]);
 				/*
 				 * XXX - right now, kernel-execution is not implemented
 				 * yet. So, we simply add it to ready_list.
@@ -1927,8 +1926,6 @@ pgstrom_iterate_foreign_scan(ForeignScanState *fss)
 		dnode = dlist_pop_head_node(&sestate->chunk_ready_list);
 		sestate->curr_chunk = dlist_container(ChunkBuffer, chain, dnode);
 		sestate->curr_index = 0;
-
-		elog(INFO, "out rowmap = %016lx", ((uint64 *)sestate->curr_chunk->cb_rowmap)[0]);
 
 		/*
 		 * Acquire tuple-level lock, if needed. In case when this chunk

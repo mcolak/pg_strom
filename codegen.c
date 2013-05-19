@@ -1098,6 +1098,7 @@ pgstrom_clfunc_lookup_raw(const char *func_name,
 		if (!finfo->func_argtypes[k])
 			elog(ERROR, "failed to lookup clTypeInfo of %s",
 				 format_type_be(func_argtypes->values[k]));
+		clfunc_increment_type_usecnt(finfo, finfo->func_argtypes[k]);
 		finfo->func_argtypes_oid[k] = finfo->func_argtypes[k]->type_oid;
 	}
 	if (func_namespace != PG_CATALOG_NAMESPACE)
@@ -1234,7 +1235,6 @@ pgstrom_funcinfo_invalidate(Datum arg, int cacheid, uint32 hashvalue)
 /*
  * __kernel void
  * kernel_qual(__global kern_params_t *kparams,
- *             int nitems,
  *             __global kern_args_t   *kargs,
  *             __global char          *kvlbuf,
  *             __global char          *kwkmem)
@@ -1252,13 +1252,16 @@ typedef struct {
 	int				usecnt_double;
 	AttrNumber		nattrs;
 	FormData_pg_attribute *attrs;
+	StringInfoData	kernel_qual;
+	StringInfoData	kparams_alias;
+	StringInfoData	kargs_alias;
 } codegen_context;
 
 static void
-codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr);
+codegen_kernel_expr(codegen_context *context, Node *expr);
 
 static void
-codegen_kernel_func(StringInfo buf, codegen_context *context,
+codegen_kernel_func(codegen_context *context,
 					Oid func_oid, List *func_args)
 {
 	clFuncInfo *finfo;
@@ -1278,7 +1281,8 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 	context->type_list = list_append_unique(context->type_list,
 											finfo->func_rettype);
 
-	appendStringInfo(buf, "%s(&rmap", finfo->func_ident);
+	appendStringInfo(&context->kernel_qual,
+					 "%s(&rmap", finfo->func_ident);
 	index = 0;
 	foreach (cell, func_args)
 	{
@@ -1290,11 +1294,11 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 				 format_type_be(exprType(expr)));
 		context->type_list = list_append_unique(context->type_list,
 												finfo->func_argtypes[index]);
-		appendStringInfo(buf, ", ");
-		codegen_kernel_expr(buf, context, expr);
+		appendStringInfo(&context->kernel_qual, ", ");
+		codegen_kernel_expr(context, expr);
 		index++;
 	}
-	appendStringInfo(buf, ")");
+	appendStringInfo(&context->kernel_qual, ")");
 
 	/* adjust planner hint */
 	context->allowed_devtype &= finfo->func_devtype;
@@ -1307,7 +1311,7 @@ codegen_kernel_func(StringInfo buf, codegen_context *context,
 }
 
 static void
-codegen_kernel_bool(StringInfo buf, codegen_context *context,
+codegen_kernel_bool(codegen_context *context,
 					BoolExprType boolop, List *args)
 {
 	clFuncInfo *finfo;
@@ -1357,7 +1361,8 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 	context->type_list = list_append_unique(context->type_list,
 											finfo->func_rettype);
 
-	appendStringInfo(buf, "%s(&rmap", finfo->func_ident);
+	appendStringInfo(&context->kernel_qual,
+					 "%s(&rmap", finfo->func_ident);
 	foreach (cell, args)
 	{
 		Node   *expr = lfirst(cell);
@@ -1365,14 +1370,14 @@ codegen_kernel_bool(StringInfo buf, codegen_context *context,
 		if (exprType(expr) != BOOLOID)
 			elog(ERROR, "Bug? BoolExpr takes non-bool argument");
 
-		appendStringInfo(buf, ", ");
-		codegen_kernel_expr(buf, context, expr);
+		appendStringInfo(&context->kernel_qual, ", ");
+		codegen_kernel_expr(context, expr);
 	}
-	appendStringInfo(buf, ")");
+	appendStringInfo(&context->kernel_qual, ")");
 }
 
 static void
-codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
+codegen_kernel_expr(codegen_context *context, Node *expr)
 {
 	clTypeInfo	   *tinfo;
 
@@ -1391,8 +1396,13 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 		context->type_list = list_append_unique(context->type_list, tinfo);
 		context->kernel_params = lappend(context->kernel_params, c);
 
-		appendStringInfo(buf, "pg_%s_pref(%u, kparams)",
+		appendStringInfo(&context->kparams_alias,
+						 "#define PG_PARAM%d pg_%s_pref(%d,kparams)\n",
+						 list_length(context->kernel_params),
 						 tinfo->type_name,
+						 list_length(context->kernel_params) - 1);
+		appendStringInfo(&context->kernel_qual,
+						 "PG_PARAM%d",
 						 list_length(context->kernel_params));
 	}
 	else if (IsA(expr, Param))
@@ -1407,8 +1417,13 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 		context->type_list = list_append_unique(context->type_list, tinfo);
 		context->kernel_params = lappend(context->kernel_params, param);
 
-		appendStringInfo(buf, "pg_%s_pref(%u, kparams)",
+		appendStringInfo(&context->kparams_alias,
+						 "#define PG_PARAM%d pg_%s_pref(%d,kparams)\n",
+						 list_length(context->kernel_params),
 						 tinfo->type_name,
+						 list_length(context->kernel_params) - 1);
+		appendStringInfo(&context->kernel_qual,
+						 "PG_PARAM%d",
 						 list_length(context->kernel_params));
 	}
 	else if (IsA(expr, Var))
@@ -1425,28 +1440,27 @@ codegen_kernel_expr(StringInfo buf, codegen_context *context, Node *expr)
 				 format_type_be(var->vartype));
 
 		context->type_list = list_append_unique(context->type_list, tinfo);
-		appendStringInfo(buf, "pg_%s_vref(%u,rowidx,kargs,kvlbuf)",
-						 tinfo->type_name,
-						 attr->attnum - 1);
+		appendStringInfo(&context->kernel_qual,
+						 "PG_ARGV%d", attr->attnum);
 	}
 	else if (IsA(expr, FuncExpr))
 	{
 		FuncExpr   *f = (FuncExpr *)expr;
 
-		codegen_kernel_func(buf, context, f->funcid, f->args);
+		codegen_kernel_func(context, f->funcid, f->args);
 	}
 	else if (IsA(expr, OpExpr) ||
 			 IsA(expr, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *)expr;
 
-		codegen_kernel_func(buf, context, op->opfuncid, op->args);
+		codegen_kernel_func(context, op->opfuncid, op->args);
 	}
 	else if (IsA(expr, BoolExpr))
 	{
 		BoolExpr   *b = (BoolExpr *)expr;
 
-		codegen_kernel_bool(buf, context, b->boolop, b->args);
+		codegen_kernel_bool(context, b->boolop, b->args);
 	}
 	else
 		elog(ERROR, "unexpected node: %s", nodeToString(expr));
@@ -1472,14 +1486,12 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	ListCell	   *cell;
 	List		   *kernel_cols = NIL;
 	bool			has_varlena = false;
-	StringInfoData	kern_qual;
 	StringInfoData	kern_body;
 
 	Assert(kernel_expr != NULL);
 	if (exprType(kernel_expr) != BOOLOID)
 		elog(ERROR, "Bug? kernel_expr has non-bool type");
 
-	initStringInfo(&kern_qual);
 	initStringInfo(&kern_body);
 	kern_body.len = VARHDRSZ;
 
@@ -1491,11 +1503,16 @@ pgstrom_codegen_qual(PlannerInfo *root,
 	context.nattrs = baserel->max_attr;
 	context.attrs = palloc0(sizeof(FormData_pg_attribute) *
 							baserel->max_attr);
+	initStringInfo(&context.kernel_qual);
+	initStringInfo(&context.kparams_alias);
+	initStringInfo(&context.kargs_alias);
 
 	pull_varattnos((Node *)kernel_expr, baserel->relid, &varattnos);
 	attidx = 0;
 	while ((attnum = bms_first_member(varattnos)) >= 0)
 	{
+		clTypeInfo *tinfo;
+
 		attnum += FirstLowInvalidHeapAttributeNumber;
 		/* Var referencing system column should not be in kernel_quals */
 		Assert(attnum > 0);
@@ -1528,13 +1545,33 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		if (context.attrs[attnum - 1].attlen < 0)
 			has_varlena = true;
 
+		/*
+		 * Add definition of shortcut to the variable reference on
+		 * kernel argument.
+		 */
+		tinfo = pgstrom_cltype_lookup(context.attrs[attnum - 1].atttypid);
+		if (!tinfo)
+			elog(ERROR, "clTypeInfo lookup failed for type: %s",
+				 format_type_be(tinfo->type_oid));
+
+		context.type_list = list_append_unique(context.type_list, tinfo);
+		appendStringInfo(&context.kargs_alias,
+						 "#define PG_ARGV%d\t\\\n"
+						 "  pg_%s_vref(%d,%s,kargs,kvlbuf)\n",
+						 attidx,
+						 tinfo->type_name,
+						 attidx - 1,
+						 tinfo->type_is_varlena ?
+						 "get_global_id(1) - get_global_offset(1)" :
+						 "get_global_id(1)");
+
 		ReleaseSysCache(tuple);
 	}
 
 	/*
 	 * Generate a kernel expression from an expression tree
 	 */
-	codegen_kernel_expr(&kern_qual, &context, kernel_expr);
+	codegen_kernel_expr(&context, kernel_expr);
 
 	/* add type definition */
 	foreach (cell, context.type_list)
@@ -1553,6 +1590,11 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		appendStringInfo(&kern_body, "%s\n", finfo->func_define);
 	}
 
+	/* shortcut for kparams/kargs */
+	appendStringInfo(&kern_body, "%s%s\n",
+					 context.kparams_alias.data,
+					 context.kargs_alias.data);
+
 	/*
 	 * XXX - Logic needs to be adjusted once we support multiple computing
 	 * units per row. A computing unit is mapped per row right now, so we
@@ -1567,22 +1609,23 @@ pgstrom_codegen_qual(PlannerInfo *root,
 		"  __global char          *gwkmem)\n"
 		"{\n"
 		"  int nitems = %s->nitems;\n"
-		"  int rowidx = get_global_id(1) * STROMCL_VECTOR_WIDTH;\n"
+//		"  int rowidx = get_global_id(1);\n"
 		"  char_v rmap;\n"
 		"  pg_bool_v result;\n"
 		"\n"
-		"  if (get_global_id(1) >= get_global_offset(1) + nitems)\n"
+		"  if (get_global_id(1) -\n"
+		"      get_global_offset(1) >= nitems / STROMCL_VECTOR_WIDTH)\n"
 		"    return;\n"
 		"\n"
 		"  rmap = pg_vload(get_global_id(1), ROWMAP_BASE(kargs));\n"
-		"  result = (%s);\n"
+		"  result = %s;\n"
 		"  rmap |= (rmap == (char)0) &\n"
 		"          (result.isnull != (char)0 | result.value == (char)0) &\n"
 		"          STROMCL_ERRCODE_ROW_MASKED;\n"
 		"  pg_vstore(rmap, get_global_id(1), ROWMAP_BASE(kargs));\n"
 		"}\n",
 		has_varlena ? "kvlbuf" : "kargs",
-		kern_qual.data);
+		context.kernel_qual.data);
 	SET_VARSIZE(kern_body.data, kern_body.len);
 
 	*p_kernel_cols = kernel_cols;

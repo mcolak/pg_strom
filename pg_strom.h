@@ -175,6 +175,7 @@ typedef struct {
 
 typedef struct {
 	dlist_node		chain;
+	cl_int			index;
 	bool			is_local;
 	/* platform information */
 	char		   *pf_profile;
@@ -383,6 +384,7 @@ extern Datum pgstrom_vacuum(PG_FUNCTION_ARGS);
 extern void pgstrom_vacuum_init(void);
 
 /* main.c */
+extern bool enable_pgstrom_debug;
 extern bool is_pgstrom_managed_server(const char *serv_name);
 extern bool is_pgstrom_managed_relation(Relation relation);
 extern Datum pgstrom_fdw_handler(PG_FUNCTION_ARGS);

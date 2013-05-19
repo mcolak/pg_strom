@@ -969,7 +969,6 @@ pgstrom_opencl_devices(PG_FUNCTION_ARGS)
 	FuncCallContext	   *fncxt;
 	dlist_head		   *device_list;
 	DeviceProperty	   *devprop;
-	int					index;
 	int					field;
 	HeapTuple			tuple;
 	Datum				values[3];
@@ -1076,12 +1075,11 @@ pgstrom_opencl_devices(PG_FUNCTION_ARGS)
 	devprop = dlist_container(DeviceProperty, chain,
 							  dlist_head_node(device_list));
 
-	index = fncxt->call_cntr / 50;
-	field = fncxt->call_cntr % 50;
-
 	memset(values, 0, sizeof(values));
 	memset(isnull, 0, sizeof(isnull));
-	values[0] = Int32GetDatum(index);
+	values[0] = Int32GetDatum(devprop->index);
+
+	field = fncxt->call_cntr % 50;
 	switch (field)
 	{
 		case 0:
