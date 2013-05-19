@@ -1911,7 +1911,7 @@ pgstrom_opencl_server_init(void)
 							   "list of opencl devices to be used",
 							   NULL,
 							   &clserv_opencl_devices,
-							   "cpu",
+							   "gpu",
 							   PGC_SIGHUP,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
