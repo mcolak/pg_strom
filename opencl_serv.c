@@ -385,7 +385,7 @@ clserv_create_kernel(openclDevice *cldev, ChunkBuffer *chunk)
 	source_str[1] = VARDATA(kernel_source);
 	source_len[0] = strlen(pgstrom_common_clhead);
 	source_len[1] = VARSIZE(kernel_source) - VARHDRSZ;
-	
+
 	clprog->program = clCreateProgramWithSource(clprog->clcxt->context,
 												2,
 												source_str,
@@ -1729,7 +1729,7 @@ init_opencl_devices(void)
 	cl_uint			n_platforms;
 	cl_uint			n_devices;
 	cl_int			i, j, rc;
-	Size			max_alloc_size = INT_MAX;
+	Size			max_alloc_size = LONG_MAX;
 	dlist_head		dev_list;
 	openclDevice   *cldev;
 
