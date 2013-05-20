@@ -21,6 +21,7 @@
 #include "storage/proc.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
+#include <unistd.h>
 #include <time.h>
 
 /* debug messages */
@@ -53,9 +54,9 @@
  * that have identical features from perspective of code build.
  */
 typedef struct {
+	dlist_node		chain;
 	cl_platform_id	platform_id;
 	cl_context		context;
-	cl_mem			host_shmem;
 	dlist_head		dev_list;
 	/* common parameters */
 	cl_device_type	dev_type;
@@ -130,6 +131,7 @@ static dlist_head	clprog_slot[CLPROGRAM_SLOT_SIZE];
 static StromQueue  *clserv_queue;
 static uintptr_t	shmem_start;
 static uintptr_t	shmem_end;
+static dlist_head	clcontext_list = DLIST_STATIC_INIT(clcontext_list);
 static const char  *opencl_strerror(cl_int errcode);
 
 #define chunk_elog(chunk,fmt,...)				\
@@ -558,8 +560,6 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 	ChunkBuffer	   *chunk = clkern->chunk;
 	openclDevice   *cldev = clkern->cldev;
 	KernelParams   *kparams = chunk->kernel_params;
-	cl_mem			host_shmem = cldev->clcxt->host_shmem;
-	cl_buffer_region region;
 	cl_mem			temp;
 	cl_int			rc, i_vlbuf = 0;
 	dlist_iter		iter;
@@ -567,40 +567,41 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 	Assert(cldev->prop.dev_host_unified_memory);
 
 	/* assign sub-buffer for kparams */
-	Assert((uintptr_t)kparams->kparams >= shmem_start &&
-		   (uintptr_t)kparams->kparams + kparams->kparams_size <= shmem_end);
-	region.origin = (uintptr_t)kparams->kparams - shmem_start;
-	region.size = kparams->kparams_size;
-	temp  = clCreateSubBuffer(host_shmem,
-							  CL_MEM_READ_WRITE,
-							  CL_BUFFER_CREATE_TYPE_REGION,
-							  &region,
-							  &rc);
+	AssertOnShmem((uintptr_t)kparams->kparams);
+	AssertOnShmem((uintptr_t)kparams->kparams + kparams->kparams_size);
+	temp = clCreateBuffer(cldev->clcxt->context,
+						  CL_MEM_READ_WRITE |
+						  CL_MEM_USE_HOST_PTR,
+						  kparams->kparams_size,
+						  kparams->kparams,
+						  &rc);
 	if (rc != CL_SUCCESS)
 	{
 		chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-					"failed on clCreateSubBuffer (%s) region=(%lu, %lu)",
-					opencl_strerror(rc), region.origin, region.size);
+					"failed on clCreateBuffer (%s) addr=%p, size=%u",
+					opencl_strerror(rc),
+					kparams->kparams,
+					kparams->kparams_size);
 		return false;
 	}
 	clkern->arg_kparams = temp;
 
 	/* assign sub-buffer of kargs */
-	Assert((uintptr_t)chunk->cb_kargs + chunk->dma_send_start >= shmem_start &&
-		   (uintptr_t)chunk->cb_kargs + chunk->dma_recv_end <= shmem_end);
-	region.origin = ((uintptr_t)chunk->cb_kargs +
-					 chunk->dma_send_start - shmem_start);
-	region.size = chunk->dma_recv_end - chunk->dma_send_start;
-	temp = clCreateSubBuffer(host_shmem,
-							 CL_MEM_READ_WRITE,
-							 CL_BUFFER_CREATE_TYPE_REGION,
-							 &region,
-							 &rc);
+	AssertOnShmem((uintptr_t)chunk->cb_kargs + chunk->dma_send_start);
+	AssertOnShmem((uintptr_t)chunk->cb_kargs + chunk->dma_recv_end);
+	temp = clCreateBuffer(cldev->clcxt->context,
+                          CL_MEM_READ_WRITE |
+                          CL_MEM_USE_HOST_PTR,
+						  chunk->dma_recv_end - chunk->dma_send_start,
+						  (char *)chunk->cb_kargs + chunk->dma_send_start,
+						  &rc);
 	if (rc != CL_SUCCESS)
 	{
 		chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-					"failed on clCreateSubBuffer (%s) region=(%lu, %lu)",
-					opencl_strerror(rc), region.origin, region.size);
+					"failed on clCreateBuffer (%s) addr=%p, size=%u",
+					opencl_strerror(rc),
+					(char *)chunk->cb_kargs + chunk->dma_send_start,
+					chunk->dma_recv_end - chunk->dma_send_start);
 		return false;
 	}
 	clkern->arg_kargs = temp;
@@ -613,18 +614,21 @@ clserv_alloc_unified_memory(openclKernel *clkern)
 			VarlenaBuffer  *vlbuf
 				= dlist_container(VarlenaBuffer, chain, iter.cur);
 
-			region.origin = (uintptr_t)(&vlbuf->kvlbuf) - shmem_start;
-			region.size = vlbuf->kvlbuf->length;
-			temp = clCreateSubBuffer(host_shmem,
-									 CL_MEM_READ_WRITE,
-									 CL_BUFFER_CREATE_TYPE_REGION,
-									 &region,
-									 &rc);
+			AssertOnShmem(&vlbuf->kvlbuf);
+			AssertOnShmem((uintptr_t)&vlbuf->kvlbuf + vlbuf->kvlbuf->length);
+			temp = clCreateBuffer(cldev->clcxt->context,
+								  CL_MEM_READ_WRITE |
+								  CL_MEM_USE_HOST_PTR,
+								  vlbuf->kvlbuf->length,
+								  &vlbuf->kvlbuf,
+								  &rc);
 			if (rc != CL_SUCCESS)
 			{
 				chunk_backq(chunk, ERRCODE_FDW_OUT_OF_MEMORY,
-							"failed on clCreateSubBuffer (%s)",
-							opencl_strerror(rc));
+							"failed on clCreateBuffer (%s) addr=%p, size=%u",
+							opencl_strerror(rc),
+							&vlbuf->kvlbuf,
+							vlbuf->kvlbuf->length);
 				return false;
 			}
 			clkern->arg_vlbufs[i_vlbuf++] = temp;
@@ -1661,6 +1665,7 @@ construct_opencl_context(cl_platform_id platform_id,
 				device_ids[device_idx++] = cldev->device_id;
 			}
 		}
+
 		/* create a relevant context */
 		clcxt->context = clCreateContext(NULL,
 										 device_idx,
@@ -1672,16 +1677,7 @@ construct_opencl_context(cl_platform_id platform_id,
 			elog(ERROR, "failed on clCreateContext (%s)",
 				 opencl_strerror(rc));
 
-		/* also, memory object of shared memory on host */
-		clcxt->host_shmem = clCreateBuffer(clcxt->context,
-										   CL_MEM_READ_WRITE |
-										   CL_MEM_USE_HOST_PTR,
-										   shmem_end - shmem_start,
-										   (void *)shmem_start,
-										   &rc);
-		if (rc != CL_SUCCESS)
-			elog(ERROR, "failed on clCreateBuffer (%s)",
-				 opencl_strerror(rc));
+		dlist_push_tail(&clcontext_list, &clcxt->chain);
 
 		/* then, create command-queue for each device */
 		dlist_foreach_modify(iter, &clcxt->dev_list)
@@ -1703,6 +1699,29 @@ construct_opencl_context(cl_platform_id platform_id,
 }
 
 static void
+shmem_cb_partitioning(void *addr, Size size)
+{
+	dlist_iter	iter;
+	cl_int		rc;
+
+	dlist_foreach(iter, &clcontext_list)
+	{
+		openclContext *clcxt = dlist_container(openclContext, chain, iter.cur);
+
+		clCreateBuffer(clcxt->context,
+					   CL_MEM_READ_WRITE |
+					   CL_MEM_USE_HOST_PTR,
+					   size,
+					   addr,
+					   &rc);
+		if (rc != CL_SUCCESS)
+			elog(ERROR, "failed on clCreateBuffer (%s)",
+				 opencl_strerror(rc));
+		dlog("shmem %p-%p was pinned", addr, (char *)addr + size);
+	}
+}
+
+static void
 init_opencl_devices(void)
 {
 	cl_platform_id	platform_ids[MAX_OPENCL_PLATFORMS];
@@ -1710,6 +1729,7 @@ init_opencl_devices(void)
 	cl_uint			n_platforms;
 	cl_uint			n_devices;
 	cl_int			i, j, rc;
+	Size			max_alloc_size = INT_MAX;
 	dlist_head		dev_list;
 	openclDevice   *cldev;
 
@@ -1767,6 +1787,10 @@ init_opencl_devices(void)
 					 cldev->prop.dev_global_mem_size >> 20,
 					 cldev->prop.pf_name);
 
+				if (!cldev->prop.dev_host_unified_memory &&
+					cldev->prop.dev_max_mem_alloc_size < max_alloc_size)
+					max_alloc_size = cldev->prop.dev_max_mem_alloc_size;
+
 				cldev_slot[cldev_nums] = cldev;
 				cldev_nums++;
 
@@ -1775,9 +1799,15 @@ init_opencl_devices(void)
 		}
 		construct_opencl_context(platform_ids[i], &dev_list);
 	}
-
 	if (cldev_nums == 0)
 		elog(LOG, "No available OpenCL devices are installed");
+	else
+	{
+		long	pagesz = sysconf(_SC_PAGESIZE);
+
+		pgstrom_shmem_partitioning(max_alloc_size & ~(pagesz - 1),
+								   shmem_cb_partitioning);
+	}
 }
 
 static void
@@ -1911,7 +1941,7 @@ pgstrom_opencl_server_init(void)
 							   "list of opencl devices to be used",
 							   NULL,
 							   &clserv_opencl_devices,
-							   "gpu",
+							   "cpu",
 							   PGC_SIGHUP,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);

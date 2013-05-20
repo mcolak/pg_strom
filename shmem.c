@@ -32,6 +32,7 @@
 #define SHMEM_BLOCK_CHUNK_BUFFER	(SHMEM_BLOCK_USED | 0x03)
 #define SHMEM_BLOCK_VARLENA_BUFFER	(SHMEM_BLOCK_USED | 0x04)
 #define SHMEM_BLOCK_DEVICE_PROPERTY	(SHMEM_BLOCK_USED | 0x05)
+#define SHMEM_BLOCK_SEPARATOR		(SHMEM_BLOCK_USED | 0x06)
 
 #define SHMEM_BLOCK_OVERRUN_MARKER(block)	\
 	(*((uint32 *)(((char *)(block)) + (block)->size - sizeof(uint32))))
@@ -72,6 +73,92 @@ static pthread_condattr_t		shmem_cond_attr;
 static dlist_head				shmem_private_track;
 static shmem_startup_hook_type	shmem_startup_hook_next = NULL;
 static ShmemHead			   *pgstrom_shmem_head;
+
+/*
+ * pgstrom_shmem_partitioning
+ *
+ * It injects separator blocks per partition_size onto free blocks larger
+ * than partition_size. OpenCL usually requires to lock host memory for
+ * zero-copy DMA, thus, application uses clCreateBuffer with
+ * CL_MEM_USE_HOST_PTR. On the other hand, max size of memory object is
+ * restricted with property of CL_DEVICE_MAX_MEM_ALLOC_SIZE.
+ * Some devices have smaller limitation than what we can specify size of
+ * PG-Strom's shared memory segment.
+ */
+void
+pgstrom_shmem_partitioning(Size partition_size,
+						   void (*callback_func)(void *addr, Size size))
+{
+	dlist_node *dnode = NULL;
+	long		pagesz = sysconf(_SC_PAGESIZE);
+
+	Assert(partition_size == MAXALIGN(partition_size));
+
+	pthread_mutex_lock(&pgstrom_shmem_head->lock);
+	if (!dlist_is_empty(&pgstrom_shmem_head->addr_head))
+		dnode = dlist_head_node(&pgstrom_shmem_head->addr_head);
+
+	while (dnode != NULL)
+	{
+		ShmemBlock *block = dlist_container(ShmemBlock, addr_list, dnode);
+		ShmemBlock *sepblk;
+
+		if (block->magic != SHMEM_BLOCK_FREE ||
+			block->size < partition_size - offsetof(ShmemBlock, data[0]))
+		{
+			if (!dlist_has_next(&pgstrom_shmem_head->addr_head, dnode))
+				break;
+			dnode = dlist_next_node(&pgstrom_shmem_head->addr_head, dnode);
+			continue;
+		}
+
+		/*
+		 * Found a free block which is larger than partition_size,
+		 * so let's separate it.
+		 */
+		sepblk = (ShmemBlock *)(((char *)block) + partition_size);
+		memset(sepblk, 0, offsetof(ShmemBlock, data[0]));
+		sepblk->magic = SHMEM_BLOCK_SEPARATOR;
+		sepblk->size = block->size - partition_size;
+		dlist_insert_after(&block->addr_list, &sepblk->addr_list);
+		sepblk->pid = getpid();
+		block->size = partition_size;
+		pgstrom_shmem_head->free_size -= sepblk->size;
+
+		/* invocation of callback to pin this free block */
+		PG_TRY();
+		{
+			if (callback_func)
+				(*callback_func)(block, block->size);
+		}
+		PG_CATCH();
+		{
+			pthread_mutex_unlock(&pgstrom_shmem_head->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		if (sepblk->size >= pagesz)
+		{
+			block = (ShmemBlock *)sepblk->data;
+			memset(block, 0, offsetof(ShmemBlock, data[0]));
+			block->magic = SHMEM_BLOCK_FREE;
+			block->size = sepblk->size - offsetof(ShmemBlock, data[0]);
+			dlist_insert_after(&sepblk->addr_list, &block->addr_list);
+			dlist_push_tail(&pgstrom_shmem_head->free_head, &block->free_list);
+			sepblk->size -= block->size;
+			pgstrom_shmem_head->free_size += block->size;
+		}
+
+		if (!dlist_has_next(&pgstrom_shmem_head->addr_head,
+							&sepblk->addr_list))
+			break;
+
+		dnode = dlist_next_node(&pgstrom_shmem_head->addr_head,
+								&sepblk->addr_list);
+	}
+	pthread_mutex_unlock(&pgstrom_shmem_head->lock);
+}
 
 /*
  * Utility routines of synchronization objects
@@ -1410,7 +1497,7 @@ static void
 pgstrom_shmem_startup(void)
 {
 	ShmemBlock *block;
-	Size		segment_sz = (pgstrom_shmem_size << 20);
+	Size		segment_sz = (Size)pgstrom_shmem_size << 20;
 	Size		page_sz = sysconf(_SC_PAGESIZE);
 	void	   *temp;
 	bool		found;
@@ -1491,7 +1578,7 @@ pgstrom_shmem_init(void)
 							NULL, NULL, NULL);
 
 	/* acquire shared memory segment */
-	RequestAddinShmemSpace(pgstrom_shmem_size << 20);
+	RequestAddinShmemSpace((Size)pgstrom_shmem_size << 20);
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_shmem_startup;
 
@@ -1673,6 +1760,9 @@ pgstrom_shmem_dump(PG_FUNCTION_ARGS)
 			break;
 		case SHMEM_BLOCK_DEVICE_PROPERTY:
 			values[0] = CStringGetTextDatum("device property");
+			break;
+		case SHMEM_BLOCK_SEPARATOR:
+			values[0] = CStringGetTextDatum("block separator");
 			break;
 		default:
 			snprintf(msgbuf, sizeof(msgbuf),

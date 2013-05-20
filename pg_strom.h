@@ -345,6 +345,9 @@ extern void pgstrom_device_property_unlock(void);
 extern DeviceProperty *pgstrom_device_property_next(DeviceProperty *devprop);
 extern Datum pgstrom_opencl_devices(PG_FUNCTION_ARGS);
 
+extern void pgstrom_shmem_partitioning(Size partition_size,
+									   void (*callback_func)(void *addr,
+															 Size size));
 extern void pgstrom_shmem_init(void);
 extern Datum pgstrom_shmem_dump(PG_FUNCTION_ARGS);
 
